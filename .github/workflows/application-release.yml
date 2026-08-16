@@ -1,0 +1,325 @@
+name: Reusable application release
+
+on:
+  workflow_call:
+    inputs:
+      descriptor:
+        description: Repository-relative application descriptor
+        required: false
+        default: .ci/application.yaml
+        type: string
+      executor:
+        description: Trusted build executor (arc or jit)
+        required: false
+        default: arc
+        type: string
+    secrets:
+      PLATFORM_GITOPS_TOKEN:
+        required: true
+      ARGOCD_SERVER:
+        required: true
+      ARGOCD_AUTH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate trusted release
+    if: github.event_name != 'pull_request'
+    runs-on: arc-k3s
+    timeout-minutes: 10
+    outputs:
+      application: ${{ steps.descriptor.outputs.application }}
+      matrix: ${{ steps.descriptor.outputs.matrix }}
+      runner: ${{ steps.executor.outputs.runner }}
+      gitops_repository: ${{ steps.descriptor.outputs.gitops_repository }}
+      gitops_repository_name: ${{ steps.descriptor.outputs.gitops_repository_name }}
+      gitops_base_branch: ${{ steps.descriptor.outputs.gitops_base_branch }}
+      gitops_staging_branch: ${{ steps.descriptor.outputs.gitops_staging_branch }}
+      gitops_production_branch: ${{ steps.descriptor.outputs.gitops_production_branch }}
+      gitops_staging_path: ${{ steps.descriptor.outputs.gitops_staging_path }}
+      gitops_production_path: ${{ steps.descriptor.outputs.gitops_production_path }}
+      gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
+    steps:
+      - name: Check out application
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate delivery contract
+        id: descriptor
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
+        with:
+          descriptor: ${{ inputs.descriptor }}
+
+      - name: Select bounded executor labels
+        id: executor
+        shell: bash
+        env:
+          EXECUTOR: ${{ inputs.executor }}
+        run: |
+          set -euo pipefail
+          case "$EXECUTOR" in
+            arc) printf 'runner=["arc-k3s"]\n' >> "$GITHUB_OUTPUT" ;;
+            jit) printf 'runner=["self-hosted","proxmox-lxc","crossbuild"]\n' >> "$GITHUB_OUTPUT" ;;
+            *) echo "executor must be arc or jit" >&2; exit 2 ;;
+          esac
+
+  verify:
+    name: Verify trusted source
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run repository verification contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x scripts/ci/verify
+          scripts/ci/verify
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [prepare, verify]
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify mounted Zot credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$HOME/.docker/config.json"
+          grep --fixed-strings --quiet 'registry.lan.kyo.ninja' "$HOME/.docker/config.json"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and publish immutable candidate
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.name }}
+          cache-from: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }}
+          cache-to: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }},mode=max
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+
+      - name: Scan published candidate
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          image-ref: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Record immutable release fragment
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.name }}
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          WORKLOAD: ${{ matrix.workload }}
+          CONTAINER: ${{ matrix.container }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          value = {key.lower(): os.environ[key] for key in ("COMPONENT", "IMAGE", "DIGEST", "WORKLOAD", "CONTAINER")}
+          with open(f"release-{value['component']}.json", "w", encoding="utf-8") as output:
+              json.dump(value, output, sort_keys=True)
+          PY
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.name }}
+          path: |
+            release-${{ matrix.name }}.json
+            sbom-${{ matrix.name }}.spdx.json
+          retention-days: 30
+          if-no-files-found: error
+
+  promote-staging:
+    name: Promote immutable digests to staging
+    needs: [prepare, build]
+    runs-on: arc-k3s
+    timeout-minutes: 20
+    environment: staging
+    steps:
+      - name: Check out validated GitOps source branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ needs.prepare.outputs.gitops_repository }}
+          ref: ${{ needs.prepare.outputs.gitops_base_branch }}
+          token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Download immutable release evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Update staging image patches
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        with:
+          images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/images.yaml
+          release-directory: release
+
+      - name: Commit staging promotion
+        id: commit
+        working-directory: gitops
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ github.sha }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "platform-delivery[bot]"
+          git config user.email "platform-delivery[bot]@users.noreply.github.com"
+          git add -- "${{ needs.prepare.outputs.gitops_staging_path }}/images.yaml"
+          if git diff --cached --quiet; then
+            echo "No staging image change required"
+          else
+            git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to staging"
+            git pull --rebase origin "$TARGET_BRANCH"
+            git push origin "HEAD:$TARGET_BRANCH"
+          fi
+          printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Argo CD staging health
+        shell: bash
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          APPLICATION: ${{ needs.prepare.outputs.gitops_staging_application }}
+          REVISION: ${{ steps.commit.outputs.revision }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            status="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+              "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+            health="$(jq -r '.status.health.status // ""' <<<"$status")"
+            sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
+            revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
+            if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Argo CD did not reconcile $APPLICATION to $REVISION in 10 minutes" >&2
+          exit 1
+
+      - name: Check out application for smoke test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: application
+
+      - name: Run fixed staging smoke contract
+        working-directory: application
+        shell: bash
+        env:
+          STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$STAGING_BASE_URL"
+          test -x scripts/ci/smoke-stg
+          scripts/ci/smoke-stg
+
+  propose-production:
+    name: Open production promotion PR
+    needs: [prepare, promote-staging]
+    runs-on: arc-k3s
+    timeout-minutes: 15
+    environment: production-promotion
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ needs.prepare.outputs.gitops_repository }}
+          ref: ${{ needs.prepare.outputs.gitops_base_branch }}
+          token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          path: gitops
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Update production image patches
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        with:
+          images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/images.yaml
+          release-directory: release
+
+      - name: Push promotion branch and open pull request
+        id: production
+        working-directory: gitops
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ github.sha }}
+          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+        run: |
+          set -euo pipefail
+          branch="promote/${APPLICATION}/${SOURCE_SHA}"
+          git config user.name "platform-delivery[bot]"
+          git config user.email "platform-delivery[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -- "${{ needs.prepare.outputs.gitops_production_path }}/images.yaml"
+          if git diff --cached --quiet; then
+            echo "Production already references these digests"
+            exit 0
+          fi
+          git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to production"
+          git push origin "$branch"
+          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Open production pull request
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REPOSITORY: ${{ needs.prepare.outputs.gitops_repository }}
+          HEAD_BRANCH: ${{ steps.production.outputs.branch }}
+          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ github.sha }}
+        with:
+          github-token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.REPOSITORY.split('/');
+            const head = process.env.HEAD_BRANCH;
+            if (!head) return;
+            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
+            if (existing.data.length) return;
+            await github.rest.pulls.create({
+              owner, repo, head, base: process.env.BASE_BRANCH,
+              title: `chore(${process.env.APPLICATION}): promote ${process.env.SOURCE_SHA.slice(0, 12)} to production`,
+              body: `Promotes the exact image digests validated in staging.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });

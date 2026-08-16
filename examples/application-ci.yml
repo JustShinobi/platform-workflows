@@ -1,0 +1,32 @@
+name: Application CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      executor:
+        description: Runner implementation used by this comparison run
+        type: choice
+        options: [arc, jit]
+        default: arc
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event_name == 'pull_request'
+    uses: JustShinobi/platform-workflows/.github/workflows/verify.yml@REPLACE_WITH_40_CHARACTER_SHA
+    with:
+      descriptor: .ci/application.yaml
+
+  release:
+    if: github.event_name != 'pull_request'
+    uses: JustShinobi/platform-workflows/.github/workflows/application-release.yml@REPLACE_WITH_40_CHARACTER_SHA
+    with:
+      descriptor: .ci/application.yaml
+      executor: ${{ inputs.executor || 'arc' }}
+    secrets: inherit
+

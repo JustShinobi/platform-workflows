@@ -1,0 +1,46 @@
+name: Validate application descriptor
+description: Validate the platform contract and expose a safe build matrix
+inputs:
+  descriptor:
+    description: Repository-relative descriptor path
+    required: false
+    default: .ci/application.yaml
+outputs:
+  application:
+    value: ${{ steps.validate.outputs.application }}
+  matrix:
+    value: ${{ steps.validate.outputs.matrix }}
+  gitops_repository:
+    value: ${{ steps.validate.outputs.gitops_repository }}
+  gitops_repository_name:
+    value: ${{ steps.validate.outputs.gitops_repository_name }}
+  gitops_base_branch:
+    value: ${{ steps.validate.outputs.gitops_base_branch }}
+  gitops_staging_branch:
+    value: ${{ steps.validate.outputs.gitops_staging_branch }}
+  gitops_production_branch:
+    value: ${{ steps.validate.outputs.gitops_production_branch }}
+  gitops_staging_path:
+    value: ${{ steps.validate.outputs.gitops_staging_path }}
+  gitops_production_path:
+    value: ${{ steps.validate.outputs.gitops_production_path }}
+  gitops_staging_application:
+    value: ${{ steps.validate.outputs.gitops_staging_application }}
+  gitops_production_application:
+    value: ${{ steps.validate.outputs.gitops_production_application }}
+runs:
+  using: composite
+  steps:
+    - name: Set up pinned Python runtime
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: '3.12'
+    - name: Install pinned parser dependency
+      shell: bash
+      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2
+    - name: Validate descriptor
+      id: validate
+      shell: bash
+      env:
+        DESCRIPTOR: ${{ inputs.descriptor }}
+      run: python3 "${{ github.action_path }}/../../../scripts/validate_descriptor.py" "$DESCRIPTOR" --github-output "$GITHUB_OUTPUT"

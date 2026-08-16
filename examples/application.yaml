@@ -1,0 +1,29 @@
+schemaVersion: 1
+application: example-app
+
+components:
+  - name: api
+    image: registry.lan.kyo.ninja/example/api
+    context: .
+    dockerfile: Dockerfile
+    workload: example-api
+    container: api
+    platforms: [linux/amd64]
+    rolloutProfile: bluegreen
+  - name: worker
+    image: registry.lan.kyo.ninja/example/worker
+    context: .
+    dockerfile: Dockerfile.worker
+    workload: example-worker
+    container: worker
+    rolloutProfile: deployment
+
+gitops:
+  repository: JustShinobi/k3s-gitops-prod
+  baseBranch: main
+  stagingBranch: deploy/stg
+  productionBranch: deploy/prod
+  stagingPath: clusters/prod/workloads/example-app-stg
+  productionPath: clusters/prod/workloads/example-app
+  stagingApplication: stg-example-app
+  productionApplication: prd-example-app

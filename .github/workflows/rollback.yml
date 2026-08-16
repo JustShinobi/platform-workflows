@@ -1,0 +1,131 @@
+name: Reusable GitOps rollback
+
+on:
+  workflow_call:
+    inputs:
+      descriptor:
+        required: false
+        default: .ci/application.yaml
+        type: string
+      environment:
+        description: stg or prod
+        required: true
+        type: string
+      revision:
+        description: Full GitOps commit SHA whose image patch must be restored
+        required: true
+        type: string
+    secrets:
+      PLATFORM_GITOPS_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rollback-${{ github.repository }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Prepare ${{ inputs.environment }} rollback
+    runs-on: arc-k3s
+    timeout-minutes: 15
+    environment: ${{ inputs.environment == 'prod' && 'production-rollback' || 'staging-rollback' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate delivery contract
+        id: descriptor
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
+        with:
+          descriptor: ${{ inputs.descriptor }}
+
+      - name: Validate rollback request
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_ENVIRONMENT" == stg || "$TARGET_ENVIRONMENT" == prod ]]
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Select bounded target
+        id: target
+        shell: bash
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          BASE_BRANCH: ${{ steps.descriptor.outputs.gitops_base_branch }}
+          STAGING_PATH: ${{ steps.descriptor.outputs.gitops_staging_path }}
+          PRODUCTION_PATH: ${{ steps.descriptor.outputs.gitops_production_path }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_ENVIRONMENT" == stg ]]; then
+            printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$STAGING_PATH" >> "$GITHUB_OUTPUT"
+          else
+            printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ steps.descriptor.outputs.gitops_repository }}
+          ref: ${{ steps.target.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          path: gitops
+
+      - name: Restore exact image patch
+        id: restore
+        working-directory: gitops
+        shell: bash
+        env:
+          REVISION: ${{ inputs.revision }}
+          TARGET_PATH: ${{ steps.target.outputs.path }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          APPLICATION: ${{ steps.descriptor.outputs.application }}
+          BASE_BRANCH: ${{ steps.target.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${REVISION}^{commit}"
+          git cat-file -e "${REVISION}:${TARGET_PATH}/images.yaml"
+          git config user.name "platform-delivery[bot]"
+          git config user.email "platform-delivery[bot]@users.noreply.github.com"
+          git checkout "$REVISION" -- "$TARGET_PATH/images.yaml"
+          git diff --check
+          if git diff --cached --quiet; then
+            echo "Requested revision is already active"
+            exit 0
+          fi
+          git commit -m "revert(${APPLICATION}): restore ${TARGET_ENVIRONMENT} images from ${REVISION:0:12}"
+          if [[ "$TARGET_ENVIRONMENT" == stg ]]; then
+            git pull --rebase origin "$BASE_BRANCH"
+            git push origin "HEAD:$BASE_BRANCH"
+          else
+            branch="rollback/${APPLICATION}/${REVISION}"
+            git switch -c "$branch"
+            git push origin "$branch"
+            printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open production rollback pull request
+        if: inputs.environment == 'prod' && steps.restore.outputs.branch != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REPOSITORY: ${{ steps.descriptor.outputs.gitops_repository }}
+          HEAD_BRANCH: ${{ steps.restore.outputs.branch }}
+          BASE_BRANCH: ${{ steps.descriptor.outputs.gitops_base_branch }}
+          APPLICATION: ${{ steps.descriptor.outputs.application }}
+          REVISION: ${{ inputs.revision }}
+        with:
+          github-token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.REPOSITORY.split('/');
+            const head = process.env.HEAD_BRANCH;
+            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
+            if (existing.data.length) return;
+            await github.rest.pulls.create({
+              owner, repo, head, base: process.env.BASE_BRANCH,
+              title: `revert(${process.env.APPLICATION}): restore production images`,
+              body: `Restores production image references from GitOps revision ${process.env.REVISION}.`,
+            });

@@ -1,0 +1,38 @@
+name: Reusable application verification
+
+on:
+  workflow_call:
+    inputs:
+      descriptor:
+        description: Repository-relative application descriptor
+        required: false
+        default: .ci/application.yaml
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify on ARC
+    runs-on: arc-k3s
+    timeout-minutes: 30
+    steps:
+      - name: Check out application
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate delivery contract
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
+        with:
+          descriptor: ${{ inputs.descriptor }}
+
+      - name: Run repository verification contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x scripts/ci/verify
+          scripts/ci/verify
