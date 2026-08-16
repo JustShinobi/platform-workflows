@@ -18,9 +18,11 @@ DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 def load_release(directory: Path) -> dict[tuple[str, str], str]:
     result: dict[tuple[str, str], str] = {}
     for path in sorted(directory.rglob("*.json")):
+        if path.name.endswith(".spdx.json"):
+            continue
         data = json.loads(path.read_text(encoding="utf-8"))
         required = {"component", "image", "digest", "workload", "container"}
-        if set(data) != required or not DIGEST.fullmatch(data["digest"]):
+        if not isinstance(data, dict) or set(data) != required or not DIGEST.fullmatch(str(data.get("digest", ""))):
             raise ValueError(f"invalid release fragment: {path}")
         target = (data["workload"], data["container"])
         if target in result:

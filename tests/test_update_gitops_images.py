@@ -21,6 +21,7 @@ class GitOpsImageTests(unittest.TestCase):
             )
             release_dir = root / "release"
             release_dir.mkdir()
+            (release_dir / "sbom-api.spdx.json").write_text(json.dumps({"spdxVersion": "SPDX-2.3"}), encoding="utf-8")
             (release_dir / "api.json").write_text(json.dumps({
                 "component": "api", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
                 "workload": "app-api", "container": "api"
