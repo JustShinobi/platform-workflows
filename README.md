@@ -94,8 +94,7 @@ consumer. Consumer reusable workflow calls should still be pinned to a full comm
   `PLATFORM_GITOPS_TOKEN` secret.
 - Descriptor keys, paths, refs, image names, platforms and rollout profiles are allowlisted.
 - Build runner labels are hardcoded; callers choose only `arc` or `jit`.
-- Builds are serialized per release and the component matrix uses `max-parallel: 1` while ARC is
-  initially limited to one runner.
+- Builds run up to 3 components in parallel per release matrix on ARC runners.
 - Every job has a timeout and promotion jobs use concurrency locks.
 - Rollback accepts only a full Git commit SHA. Staging rollback commits to validated `main` and is
   advanced by the GitOps channel workflow; production rollback opens a PR.
