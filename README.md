@@ -74,9 +74,11 @@ Application repositories expose these Actions secrets to the reusable release wo
 | `PLATFORM_GITOPS_TOKEN` | Fine-grained PAT allowed to write the GitOps repository and open PRs |
 | `ARGOCD_SERVER` / `ARGOCD_AUTH_TOKEN` | Read-only Argo CD API access to application status |
 
-ARC mounts `arc-runners/arc-zot-docker-config` at `/home/runner/.docker/config.json`; Zot
-credentials are deliberately not copied into application repository secrets. JIT runners must
-provide an equivalent Docker config before they are selected with `executor: jit`.
+ARC mounts `arc-runners/arc-zot-docker-config` read-only at
+`/run/secrets/zot/config.json`. The release workflow copies it with mode `0600` to a writable,
+job-scoped `DOCKER_CONFIG`; Zot credentials are deliberately not copied into application
+repository secrets. JIT runners must provide the same read-only source file before they are
+selected with `executor: jit`.
 
 Create GitHub environments named `staging`, `production-promotion`, `staging-rollback`, and
 `production-rollback`. Approval is normally required only for production rollback; the promotion
