@@ -22,6 +22,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('runner=["self-hosted","proxmox-lxc","crossbuild"]', release)
         self.assertNotIn("runs-on: ubuntu", release)
 
+    def test_trivy_binary_version_is_explicit(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertRegex(release, r"uses: aquasecurity/trivy-action@[^\s]+[^\n]*\n\s+with:\n\s+version: v\d+\.\d+\.\d+")
+
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")
         self.assertNotIn('"command"', validator)
