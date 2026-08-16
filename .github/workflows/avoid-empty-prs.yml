@@ -1,0 +1,39 @@
+name: 🖥️ Check and Close Empty PRs
+
+on:
+  workflow_call:
+    inputs:
+      RUNS_ON:
+        description: Runner type
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  check-empty-pr:
+    name: Check empty PRs
+    runs-on: ${{ inputs.RUNS_ON }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Check changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+
+      - name: Handle Empty PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        run: |
+          if [ -z "$ALL_CHANGED_FILES" ] && [ -n "$PR_NUMBER" ]; then
+            echo "::warning::No changes detected in PR #$PR_NUMBER. Labeling and closing..."
+            gh pr comment "$PR_NUMBER" --body "⚠️ No changes detected in this Pull Request. Automatically closing." -R "$GH_REPO" || true
+            gh pr edit "$PR_NUMBER" --add-label "invalid,wontfix" -R "$GH_REPO" || true
+            gh pr close "$PR_NUMBER" -R "$GH_REPO" || true
+          else
+            echo "Changes detected in PR. Proceeding normally."
+          fi
