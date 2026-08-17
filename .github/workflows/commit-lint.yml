@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   commit-lint:
-    name: Lint PR Title & Commits
+    name: Lint PR Title and Commits
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR Title (Conventional Commits)

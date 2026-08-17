@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   helm-validation:
-    name: Helm Lint & Guardrails
+    name: Helm Lint and Guardrails
     runs-on: arc-k3s
     steps:
       - name: Checkout repository

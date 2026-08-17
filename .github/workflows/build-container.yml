@@ -7,34 +7,29 @@ on:
         description: Target image name (e.g. my-app)
         required: false
         type: string
-        default: ''
+        default: app
       DOCKERFILE_PATH:
         description: Path to Dockerfile
         required: false
         type: string
-        default: 'Dockerfile'
+        default: Dockerfile
       REGISTRY_URL:
-        description: Target Container Registry URL (e.g., registry.lan.kyo.ninja)
+        description: Target Container Registry URL (e.g. registry.lan.kyo.ninja)
         required: false
         type: string
-        default: 'registry.lan.kyo.ninja'
+        default: registry.lan.kyo.ninja
       IMAGE_TAG:
         description: Additional tag for the image (defaults to git commit sha + latest)
         required: false
         type: string
-        default: 'latest'
-    secrets:
-      REGISTRY_USERNAME:
-        required: false
-      REGISTRY_PASSWORD:
-        required: false
+        default: latest
 
 permissions:
   contents: read
 
 jobs:
   build-and-push-container:
-    name: Build & Push Container Image
+    name: Build and Push Container Image
     runs-on: arc-k3s
     steps:
       - name: Checkout repository
