@@ -28,6 +28,8 @@ outputs:
     value: ${{ steps.validate.outputs.gitops_staging_application }}
   gitops_production_application:
     value: ${{ steps.validate.outputs.gitops_production_application }}
+  gitops_image_promotion:
+    value: ${{ steps.validate.outputs.gitops_image_promotion }}
 runs:
   using: composite
   steps:

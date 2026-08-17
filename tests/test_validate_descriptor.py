@@ -66,6 +66,20 @@ class DescriptorTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidDescriptor, "unsupported platform"):
                 load_and_validate(self.write(Path(directory), value), check_files=False)
 
+    def test_accepts_chart_values_image_promotion(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"]["imagePromotion"] = "chart-values"
+        with tempfile.TemporaryDirectory() as directory:
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertEqual(data["gitops"]["imagePromotion"], "chart-values")
+
+    def test_rejects_unknown_image_promotion(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"]["imagePromotion"] = "arbitrary"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "imagePromotion"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
     def test_allows_shared_image_repository(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
         value["components"].append({

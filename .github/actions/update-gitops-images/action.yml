@@ -7,6 +7,10 @@ inputs:
   release-directory:
     description: Directory containing validated release fragments
     required: true
+  mode:
+    description: Target file kind (kustomize images.yaml or chart-values)
+    required: false
+    default: kustomize
 runs:
   using: composite
   steps:
@@ -22,4 +26,4 @@ runs:
       env:
         IMAGES_FILE: ${{ inputs.images-file }}
         RELEASE_DIRECTORY: ${{ inputs.release-directory }}
-      run: python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" "$IMAGES_FILE" "$RELEASE_DIRECTORY"
+      run: python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"

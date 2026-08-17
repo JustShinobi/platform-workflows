@@ -9,10 +9,10 @@ on:
         type: string
         default: 'chart'
       REGISTRY_URL:
-        description: Target OCI Registry URL (e.g., zot.lan.kyo.ninja or ghcr.io)
+        description: Target OCI Registry URL (e.g., registry.lan.kyo.ninja)
         required: false
         type: string
-        default: 'zot.lan.kyo.ninja'
+        default: 'registry.lan.kyo.ninja'
       REGISTRY_NAMESPACE:
         description: Namespace/repository path in the registry
         required: false
@@ -22,7 +22,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'ubuntu-latest'
+        default: 'arc-k3s'
     secrets:
       REGISTRY_USERNAME:
         description: Registry login username
@@ -37,10 +37,10 @@ jobs:
     runs-on: ${{ inputs.RUNS_ON }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: 'latest'
 

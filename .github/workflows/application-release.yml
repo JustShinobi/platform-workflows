@@ -46,6 +46,7 @@ jobs:
       gitops_staging_path: ${{ steps.descriptor.outputs.gitops_staging_path }}
       gitops_production_path: ${{ steps.descriptor.outputs.gitops_production_path }}
       gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
+      image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
     steps:
       - name: Check out application
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -198,8 +199,9 @@ jobs:
       - name: Update staging image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
         with:
-          images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/images.yaml
+          images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
+          mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
 
       - name: Commit staging promotion
         id: commit
@@ -213,7 +215,7 @@ jobs:
           set -euo pipefail
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          git add -- "${{ needs.prepare.outputs.gitops_staging_path }}/images.yaml"
+          git add -- "${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}"
           if git diff --cached --quiet; then
             echo "No staging image change required"
           else
@@ -293,8 +295,9 @@ jobs:
       - name: Update production image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
         with:
-          images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/images.yaml
+          images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
           release-directory: release
+          mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
 
       - name: Push promotion branch and open pull request
         id: production
@@ -310,7 +313,7 @@ jobs:
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add -- "${{ needs.prepare.outputs.gitops_production_path }}/images.yaml"
+          git add -- "${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}"
           if git diff --cached --quiet; then
             echo "Production already references these digests"
             exit 0

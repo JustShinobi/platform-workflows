@@ -31,6 +31,8 @@ GITOPS_KEYS = {
     "repository", "baseBranch", "stagingBranch", "productionBranch", "stagingPath",
     "productionPath", "stagingApplication", "productionApplication"
 }
+GITOPS_OPTIONAL_KEYS = {"imagePromotion"}
+IMAGE_PROMOTION_MODES = {"kustomize-images", "chart-values"}
 
 
 class InvalidDescriptor(ValueError):
@@ -118,7 +120,9 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
             raise InvalidDescriptor(f"{label}.rolloutProfile is invalid")
 
     gitops = _mapping(data["gitops"], "gitops")
-    _keys(gitops, GITOPS_KEYS, GITOPS_KEYS, "gitops")
+    _keys(gitops, GITOPS_KEYS | GITOPS_OPTIONAL_KEYS, GITOPS_KEYS, "gitops")
+    if gitops.get("imagePromotion", "kustomize-images") not in IMAGE_PROMOTION_MODES:
+        raise InvalidDescriptor("gitops.imagePromotion must be kustomize-images or chart-values")
     _string(gitops["repository"], "gitops.repository", REPOSITORY)
     for key in ("baseBranch", "stagingBranch", "productionBranch"):
         _string(gitops[key], f"gitops.{key}", REF)
@@ -171,6 +175,7 @@ def main() -> int:
             "gitops_staging_application": gitops["stagingApplication"],
             "gitops_production_application": gitops["productionApplication"],
             "gitops_repository_name": gitops["repository"].split("/", 1)[1],
+            "gitops_image_promotion": gitops.get("imagePromotion", "kustomize-images"),
         }
         with args.github_output.open("a", encoding="utf-8") as output:
             for key, value in values.items():
