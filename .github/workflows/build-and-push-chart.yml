@@ -49,6 +49,14 @@ jobs:
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "${{ inputs.REGISTRY_URL }}" --username "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
+      - name: Use mounted Zot credentials when available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -s /run/secrets/zot/config.json ]; then
+            printf 'HELM_REGISTRY_CONFIG=%s\n' /run/secrets/zot/config.json >> "$GITHUB_ENV"
+          fi
+
       - name: Build Chart Dependencies
         run: |
           if [ -f "${{ inputs.CHART_PATH }}/Chart.yaml" ]; then
