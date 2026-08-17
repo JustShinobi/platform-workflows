@@ -46,7 +46,7 @@ jobs:
           version: 'latest'
 
       - name: Helm Registry Login
-        if: ${{ secrets.REGISTRY_USERNAME != '' && secrets.REGISTRY_PASSWORD != '' }}
+        if: secrets.REGISTRY_USERNAME != '' && secrets.REGISTRY_PASSWORD != ''
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "${{ inputs.REGISTRY_URL }}" --username "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 

@@ -53,5 +53,15 @@ class WorkflowContractTests(unittest.TestCase):
                         )
 
 
+    def test_if_conditionals_do_not_use_expression_braces(self) -> None:
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                text,
+                r"^\s*if:\s*\$\{\{",
+                f"workflow {path.name} uses redundant/invalid '${{{{ }}}}' syntax in 'if' conditional",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
