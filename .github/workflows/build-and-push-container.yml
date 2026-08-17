@@ -1,4 +1,4 @@
-name: 🐳 Build and Push Container Image
+name: Build and Push Container Image
 
 on:
   workflow_call:
@@ -13,10 +13,10 @@ on:
         type: string
         default: 'Dockerfile'
       REGISTRY_URL:
-        description: Target Container Registry URL (e.g., zot.lan.kyo.ninja or ghcr.io)
+        description: Target Container Registry URL (e.g., registry.lan.kyo.ninja)
         required: false
         type: string
-        default: 'zot.lan.kyo.ninja'
+        default: 'registry.lan.kyo.ninja'
       IMAGE_TAG:
         description: Additional tag for the image (defaults to git commit sha + latest)
         required: false
@@ -26,7 +26,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'ubuntu-latest'
+        default: 'arc-k3s'
     secrets:
       REGISTRY_USERNAME:
         description: Registry login username
@@ -41,14 +41,23 @@ jobs:
     runs-on: ${{ inputs.RUNS_ON }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Use mounted Zot credentials when available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -s /run/secrets/zot/config.json ]; then
+            install -d -m 0700 "${HOME}/.docker"
+            install -m 0600 /run/secrets/zot/config.json "${HOME}/.docker/config.json"
+          fi
 
       - name: Log in to Registry
         if: ${{ secrets.REGISTRY_USERNAME != '' && secrets.REGISTRY_PASSWORD != '' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ${{ inputs.REGISTRY_URL }}
           username: ${{ secrets.REGISTRY_USERNAME }}
@@ -56,7 +65,7 @@ jobs:
 
       - name: Extract metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ${{ inputs.REGISTRY_URL }}/${{ inputs.IMAGE_NAME }}
           tags: |
@@ -65,7 +74,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v5.5.0
         with:
           context: .
           file: ${{ inputs.DOCKERFILE_PATH }}

@@ -8,13 +8,19 @@ ROOT = Path(__file__).parents[1]
 
 class WorkflowContractTests(unittest.TestCase):
     def test_all_external_actions_are_versioned(self) -> None:
+        sha40_re = re.compile(r"^[0-9a-f]{40}$")
         for path in (ROOT / ".github").rglob("*.yml"):
             text = path.read_text(encoding="utf-8")
             for action in re.findall(r"^\s*uses:\s*([^\s]+)", text, re.MULTILINE):
                 if action.startswith("./"):
                     continue
                 self.assertIn("@", action, f"unversioned action in {path}: {action}")
-                self.assertNotRegex(action, r"@(main|master|latest)$", f"moving action ref in {path}")
+                target, ref = action.split("@", 1)
+                if not target.startswith("JustShinobi/platform-workflows"):
+                    self.assertTrue(
+                        sha40_re.match(ref),
+                        f"action in {path} must be pinned to full 40-char commit SHA: {action}",
+                    )
 
     def test_zot_publication_is_never_github_hosted(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")

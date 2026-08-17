@@ -1,4 +1,4 @@
-name: 📦 Build and Push Helm Chart (OCI)
+name: Build and Push Helm Chart OCI
 
 on:
   workflow_call:

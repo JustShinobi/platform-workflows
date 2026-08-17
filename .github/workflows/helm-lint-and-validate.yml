@@ -1,4 +1,4 @@
-name: 🛡️ Helm Lint and Guardrails Validation
+name: Helm Lint and Guardrails Validation
 
 on:
   workflow_call:

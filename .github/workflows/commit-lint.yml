@@ -1,4 +1,4 @@
-name: 📝 Conventional Commits Validation
+name: Conventional Commits Validation
 
 on:
   workflow_call:
@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Validate PR Title (Conventional Commits)
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
-        uses: amannn/action-semantic-pull-request@v5
+        uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
