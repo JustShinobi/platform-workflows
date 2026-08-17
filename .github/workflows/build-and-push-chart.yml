@@ -34,7 +34,7 @@ on:
 jobs:
   build-and-push-chart:
     name: Package & Push Helm Chart
-    runs-on: ${{ inputs.RUNS_ON }}
+    runs-on: arc-k3s
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

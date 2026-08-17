@@ -12,7 +12,7 @@ on:
 jobs:
   commit-lint:
     name: Lint PR Title & Commits
-    runs-on: ${{ inputs.RUNS_ON }}
+    runs-on: ubuntu-latest
     steps:
       - name: Validate PR Title (Conventional Commits)
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'

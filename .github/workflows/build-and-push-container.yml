@@ -22,11 +22,6 @@ on:
         required: false
         type: string
         default: 'latest'
-      RUNS_ON:
-        description: Runner type
-        required: false
-        type: string
-        default: 'arc-k3s'
     secrets:
       REGISTRY_USERNAME:
         description: Registry login username
@@ -38,7 +33,7 @@ on:
 jobs:
   build-and-push-container:
     name: Build & Push Container Image
-    runs-on: ${{ inputs.RUNS_ON }}
+    runs-on: arc-k3s
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
