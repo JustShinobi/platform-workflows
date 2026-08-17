@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 15
     environment: ${{ inputs.environment == 'prod' && 'production-rollback' || 'staging-rollback' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate delivery contract
         id: descriptor
@@ -67,7 +67,7 @@ jobs:
             printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.descriptor.outputs.gitops_repository }}
           ref: ${{ steps.target.outputs.branch }}
@@ -110,7 +110,7 @@ jobs:
 
       - name: Open production rollback pull request
         if: inputs.environment == 'prod' && steps.restore.outputs.branch != ''
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REPOSITORY: ${{ steps.descriptor.outputs.gitops_repository }}
           HEAD_BRANCH: ${{ steps.restore.outputs.branch }}
