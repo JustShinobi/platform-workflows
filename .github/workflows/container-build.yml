@@ -26,7 +26,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'ubuntu-latest'
+        default: 'arc-k3s'
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ permissions:
 jobs:
   build-and-push-container:
     name: Build and Push Container Image
-    runs-on: ${{ inputs.RUNS_ON || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
