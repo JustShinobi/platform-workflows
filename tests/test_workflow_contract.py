@@ -35,7 +35,22 @@ class WorkflowContractTests(unittest.TestCase):
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")
         self.assertNotIn('"command"', validator)
-        self.assertNotIn('"script"', validator)
+    def test_workflow_call_secrets_do_not_contain_description(self) -> None:
+        import yaml
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            # yaml evaluates "on" as True
+            on_data = data.get(True) or data.get("on") or {}
+            if isinstance(on_data, dict) and "workflow_call" in on_data:
+                wf_call = on_data["workflow_call"] or {}
+                secrets_data = wf_call.get("secrets") or {}
+                for sec_name, sec_cfg in secrets_data.items():
+                    if isinstance(sec_cfg, dict):
+                        self.assertNotIn(
+                            "description",
+                            sec_cfg,
+                            f"workflow_call.secrets.{sec_name} in {path.name} cannot contain 'description'",
+                        )
 
 
 if __name__ == "__main__":

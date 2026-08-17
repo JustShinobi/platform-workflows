@@ -24,10 +24,8 @@ on:
         default: 'latest'
     secrets:
       REGISTRY_USERNAME:
-        description: Registry login username
         required: false
       REGISTRY_PASSWORD:
-        description: Registry login password
         required: false
 
 jobs:
