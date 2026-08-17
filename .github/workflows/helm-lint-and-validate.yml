@@ -19,6 +19,9 @@ on:
         type: string
         default: 'arc-k3s'
 
+permissions:
+  contents: read
+
 jobs:
   helm-validation:
     name: Helm Lint & Guardrails

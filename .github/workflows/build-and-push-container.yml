@@ -5,8 +5,9 @@ on:
     inputs:
       IMAGE_NAME:
         description: Target image name (e.g. my-app)
-        required: true
+        required: false
         type: string
+        default: ''
       DOCKERFILE_PATH:
         description: Path to Dockerfile
         required: false
@@ -27,6 +28,9 @@ on:
         required: false
       REGISTRY_PASSWORD:
         required: false
+
+permissions:
+  contents: read
 
 jobs:
   build-and-push-container:

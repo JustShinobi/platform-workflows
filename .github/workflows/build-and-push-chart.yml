@@ -29,6 +29,9 @@ on:
       REGISTRY_PASSWORD:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   build-and-push-chart:
     name: Package & Push Helm Chart
