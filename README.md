@@ -50,8 +50,8 @@ flowchart TD
 | [`rollback.yml`](.github/workflows/rollback.yml) | `workflow_dispatch` | **Rollback Seguro:** Rollback controlado de versão no GitOps para Staging ou Produção com auditoria completa e lock de concorrência. |
 | [`sync-secrets-infisical.yml`](.github/workflows/sync-secrets-infisical.yml) | `workflow_dispatch` / `call` | **Sincronização de Segredos:** Sincronização automatizada de variáveis e segredos a partir do Infisical (`infisical.lan.kyo.ninja`). |
 | [`helm-lint-and-validate.yml`](.github/workflows/helm-lint-and-validate.yml) | `workflow_call` | Validação de sintaxe, template rendering e resolução de dependências OCI de Helm Charts. |
-| [`build-container.yml`](.github/workflows/build-container.yml) | `workflow_call` | Build e publicação direta de contêiner único no Zot Registry (compatibilidade legada). |
-| [`build-chart.yml`](.github/workflows/build-chart.yml) | `workflow_call` | Empacotamento e publicação direta de Helm Chart OCI no Zot Registry (`oci://registry.lan.kyo.ninja/charts`). |
+| [`container-build.yml`](.github/workflows/container-build.yml) | `workflow_call` | Build e publicação direta de contêiner único no Zot Registry (compatibilidade legada). |
+| [`chart-build.yml`](.github/workflows/chart-build.yml) | `workflow_call` | Empacotamento e publicação direta de Helm Chart OCI no Zot Registry (`oci://registry.lan.kyo.ninja/charts`). |
 | [`avoid-empty-prs.yml`](.github/workflows/avoid-empty-prs.yml) | `workflow_call` | Guardrail de CI que detecta e fecha automaticamente Pull Requests vazios ou sem alterações. |
 | [`commit-lint.yml`](.github/workflows/commit-lint.yml) | `workflow_call` | Validação estrita de títulos de PR seguindo a convenção *Conventional Commits*. |
 | [`self-test.yml`](.github/workflows/self-test.yml) | `push` / `pull_request` | Suíte de testes unitários e validação dos JSON Schemas do próprio repositório `platform-workflows`. |
