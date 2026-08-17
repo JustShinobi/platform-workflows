@@ -18,6 +18,29 @@ on:
         required: false
         type: string
         default: charts
+    secrets:
+      REGISTRY_USERNAME:
+        required: false
+      REGISTRY_PASSWORD:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      CHART_PATH:
+        description: Path to the Helm chart directory
+        required: false
+        type: string
+        default: chart
+      REGISTRY_URL:
+        description: Target OCI Registry URL
+        required: false
+        type: string
+        default: registry.lan.kyo.ninja
+      REGISTRY_NAMESPACE:
+        description: Namespace/repository path in the registry
+        required: false
+        type: string
+        default: charts
 
 permissions:
   contents: read

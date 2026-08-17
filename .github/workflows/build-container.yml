@@ -23,6 +23,34 @@ on:
         required: false
         type: string
         default: latest
+    secrets:
+      REGISTRY_USERNAME:
+        required: false
+      REGISTRY_PASSWORD:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      IMAGE_NAME:
+        description: Target image name (e.g. my-app)
+        required: true
+        type: string
+        default: app
+      DOCKERFILE_PATH:
+        description: Path to Dockerfile
+        required: false
+        type: string
+        default: Dockerfile
+      REGISTRY_URL:
+        description: Target Container Registry URL
+        required: false
+        type: string
+        default: registry.lan.kyo.ninja
+      IMAGE_TAG:
+        description: Additional tag for the image
+        required: false
+        type: string
+        default: latest
 
 permissions:
   contents: read
