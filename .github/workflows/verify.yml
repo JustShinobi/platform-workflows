@@ -47,6 +47,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-build-${{ matrix.task }}-${{ hashFiles('**/package-lock.json') }}-
 
+      - name: Install dependencies
+        shell: bash
+        run: npm ci
+
       - name: Run verification task
         shell: bash
         env:
