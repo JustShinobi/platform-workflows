@@ -21,11 +21,6 @@ on:
       ARGOCD_AUTH_TOKEN:
         required: true
 
-permissions:
-  contents: read
-  checks: read
-  pull-requests: read
-
 concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false

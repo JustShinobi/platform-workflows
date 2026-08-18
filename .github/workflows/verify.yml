@@ -9,9 +9,6 @@ on:
         default: .ci/application.yaml
         type: string
 
-permissions:
-  contents: read
-
 concurrency:
   group: verify-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
