@@ -24,7 +24,7 @@ jobs:
         task: [lint, typecheck, test, build]
     steps:
       - name: Check out application
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v4.2.2
 
       - name: Validate delivery contract
         uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
@@ -32,13 +32,13 @@ jobs:
           descriptor: ${{ inputs.descriptor }}
 
       - name: Set up Node.js runtime
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v4.2.0
         with:
           node-version: '24'
           cache: npm
 
       - name: Next.js and build cache
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4.2.0
         with:
           path: |
             apps/admin/.next/cache

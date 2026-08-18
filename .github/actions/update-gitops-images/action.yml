@@ -15,7 +15,7 @@ runs:
   using: composite
   steps:
     - name: Set up pinned Python runtime
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # v5.4.0
       with:
         python-version: '3.12'
     - name: Install pinned parser dependency
