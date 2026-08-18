@@ -218,9 +218,8 @@ jobs:
   promote-staging:
     name: Promote immutable digests to staging
     needs: [prepare, build]
-    runs-on: arc-k3s
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 20
-    environment: staging
     steps:
       - name: Check out validated GitOps source branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -316,9 +315,8 @@ jobs:
   propose-production:
     name: Open production promotion PR
     needs: [prepare, promote-staging]
-    runs-on: arc-k3s
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 15
-    environment: production-promotion
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
