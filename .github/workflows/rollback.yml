@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 15
     environment: ${{ inputs.environment == 'prod' && 'production-rollback' || 'staging-rollback' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - name: Validate delivery contract
         id: descriptor
@@ -67,7 +67,7 @@ jobs:
             printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           repository: ${{ steps.descriptor.outputs.gitops_repository }}
           ref: ${{ steps.target.outputs.branch }}
