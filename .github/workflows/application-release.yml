@@ -23,6 +23,8 @@ on:
 
 permissions:
   contents: read
+  checks: read
+  pull-requests: read
 
 concurrency:
   group: release-${{ github.repository }}
@@ -82,25 +84,29 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const checks = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: context.sha,
-            });
-            const verifyRuns = checks.data.check_runs.filter(r => 
-              r.name.toLowerCase().includes('verify') || 
-              r.name.toLowerCase().includes('lint') ||
-              r.name.toLowerCase().includes('typecheck') ||
-              r.name.toLowerCase().includes('test')
-            );
-            const allPassed = verifyRuns.length > 0 && verifyRuns.every(r => r.conclusion === 'success');
-            if (allPassed) {
-              console.log(`Commit ${context.sha} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
-              core.setOutput('skip', 'true');
-            } else {
+            try {
+              const checks = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.sha,
+              });
+              const verifyRuns = checks.data.check_runs.filter(r => 
+                r.name.toLowerCase().includes('verify') || 
+                r.name.toLowerCase().includes('lint') ||
+                r.name.toLowerCase().includes('typecheck') ||
+                r.name.toLowerCase().includes('test')
+              );
+              const allPassed = verifyRuns.length > 0 && verifyRuns.every(r => r.conclusion === 'success');
+              if (allPassed) {
+                console.log(`Commit ${context.sha} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
+                core.setOutput('skip', 'true');
+                return;
+              }
               console.log(`Commit ${context.sha} needs verification (passed checks: ${verifyRuns.length}).`);
-              core.setOutput('skip', 'false');
+            } catch (err) {
+              console.log(`Could not check commit status (${err.message}). Proceeding with verification.`);
             }
+            core.setOutput('skip', 'false');
       - name: Set up Node.js runtime
         if: steps.check_pr.outputs.skip != 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
