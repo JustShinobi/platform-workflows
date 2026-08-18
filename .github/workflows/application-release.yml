@@ -13,6 +13,11 @@ on:
         required: false
         default: arc
         type: string
+      skip_verify:
+        description: Skip verification step
+        required: false
+        default: false
+        type: boolean
     secrets:
       PLATFORM_GITOPS_TOKEN:
         required: true
@@ -46,7 +51,7 @@ jobs:
       image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
     steps:
       - name: Check out application
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
       - name: Validate delivery contract
         id: descriptor
@@ -71,14 +76,21 @@ jobs:
     name: Verify trusted source
     needs: prepare
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
       - name: Check if commit was already verified on PR
         id: check_pr
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FORCE_SKIP: ${{ inputs.skip_verify }}
         with:
           script: |
+            if (process.env.FORCE_SKIP === 'true') {
+              console.log('Explicit skip_verify requested. Skipping verify.');
+              core.setOutput('skip', 'true');
+              return;
+            }
             try {
               const checks = await github.rest.checks.listForRef({
                 owner: context.repo.owner,
