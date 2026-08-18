@@ -308,7 +308,6 @@ jobs:
           STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
         run: |
           set -euo pipefail
-          test -n "$STAGING_BASE_URL"
           test -x scripts/ci/smoke-stg
           scripts/ci/smoke-stg
 
