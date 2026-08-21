@@ -114,12 +114,28 @@ jobs:
               console.log(`Could not check commit status (${err.message}). Proceeding with verification.`);
             }
             core.setOutput('skip', 'false');
+      - name: Detect a Node dependency cache
+        id: node_cache
+        if: steps.check_pr.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `actions/setup-node` fails outright when `cache` is set and no
+          # lockfile matches at the repository root. A repository whose Node
+          # workspace lives in a subdirectory — or which uses a package manager
+          # other than npm there — has nothing to match and cannot be verified
+          # at all, which is a cache optimisation deciding whether CI runs.
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+            echo "kind=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up Node.js runtime
         if: steps.check_pr.outputs.skip != 'true'
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: npm
+          cache: ${{ steps.node_cache.outputs.kind }}
       - name: Run repository verification contract
         if: steps.check_pr.outputs.skip != 'true'
         shell: bash

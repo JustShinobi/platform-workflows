@@ -31,11 +31,27 @@ jobs:
         with:
           descriptor: ${{ inputs.descriptor }}
 
+      - name: Detect a Node dependency cache
+        id: node_cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `actions/setup-node` fails outright when `cache` is set and no
+          # lockfile matches at the repository root. A repository whose Node
+          # workspace lives in a subdirectory has nothing to match and cannot be
+          # verified at all, which is a cache optimisation deciding whether CI
+          # runs.
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+            echo "kind=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Node.js runtime
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v4.2.0
         with:
           node-version: '24'
-          cache: npm
+          cache: ${{ steps.node_cache.outputs.kind }}
 
       - name: Next.js and build cache
         uses: actions/cache@3edfce9056124e459a23f683a21433670d47daca # v4.2.0
