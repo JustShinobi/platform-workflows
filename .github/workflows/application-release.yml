@@ -310,12 +310,37 @@ jobs:
         with:
           path: application
 
+      - name: Detect a Node dependency cache for the smoke test
+        id: smoke_node_cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same failure as the verification job above, one checkout deeper.
+          # `actions/setup-node` fails outright when `cache` is set and the
+          # dependency path matches nothing, so an application whose Node
+          # workspace lives in a subdirectory — or which uses a package manager
+          # other than npm there — cannot be smoke-tested at all.
+          #
+          # Worse here than there, because by this point the promotion has
+          # already happened and Argo CD has already reported the deployment
+          # healthy. The run goes red for a cache it never needed, after the
+          # thing it was verifying succeeded.
+          for lockfile in package-lock.json npm-shrinkwrap.json yarn.lock; do
+            if [ -f "application/$lockfile" ]; then
+              echo "kind=npm" >> "$GITHUB_OUTPUT"
+              echo "path=application/$lockfile" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "kind=" >> "$GITHUB_OUTPUT"
+          echo "path=" >> "$GITHUB_OUTPUT"
+
       - name: Set up Node.js runtime
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: application/package-lock.json
+          cache: ${{ steps.smoke_node_cache.outputs.kind }}
+          cache-dependency-path: ${{ steps.smoke_node_cache.outputs.path }}
 
       - name: Run fixed staging smoke contract
         working-directory: application
