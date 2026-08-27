@@ -22,9 +22,10 @@ jobs:
   verify:
     name: Verify (${{ matrix.task }})
     runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         task: [lint, typecheck, test, build]
     steps:
