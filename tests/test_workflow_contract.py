@@ -28,6 +28,11 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('runner=["self-hosted","proxmox-lxc","crossbuild"]', release)
         self.assertNotIn("runs-on: ubuntu", release)
 
+    def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("runs-on: ubuntu", text, f"{path.name} still uses runs-on: ubuntu")
+
     def test_trivy_binary_version_is_explicit(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         self.assertRegex(release, r"uses: aquasecurity/trivy-action@[^\s]+[^\n]*\n\s+with:\n\s+version: v\d+\.\d+\.\d+")

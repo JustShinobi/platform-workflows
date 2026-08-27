@@ -7,7 +7,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'ubuntu-latest'
+        default: 'arc-k3s'
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ permissions:
 jobs:
   check-empty-pr:
     name: Check empty PRs
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
     timeout-minutes: 5
     steps:
       - name: Checkout repository code
