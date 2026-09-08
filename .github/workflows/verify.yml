@@ -60,7 +60,10 @@ jobs:
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v4.2.0
         with:
           node-version: '24'
-          cache: ${{ steps.node_cache.outputs.kind }}
+          # setup-node asks the package manager for its cache path while this
+          # step runs. pnpm is enabled after Node is installed, so do not ask
+          # setup-node to resolve the pnpm cache here.
+          cache: ${{ steps.node_cache.outputs.kind == 'npm' && 'npm' || steps.node_cache.outputs.kind == 'yarn' && 'yarn' || '' }}
           cache-dependency-path: ${{ steps.node_cache.outputs.path }}
 
       - name: Next.js and build cache

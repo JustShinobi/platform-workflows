@@ -142,7 +142,9 @@ jobs:
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: ${{ steps.node_cache.outputs.kind }}
+          # pnpm is enabled after Node is installed; resolving its cache here
+          # would fail before Corepack can create the pnpm shim.
+          cache: ${{ steps.node_cache.outputs.kind == 'npm' && 'npm' || steps.node_cache.outputs.kind == 'yarn' && 'yarn' || '' }}
           cache-dependency-path: ${{ steps.node_cache.outputs.path }}
       - name: Run repository verification contract
         if: steps.check_pr.outputs.skip != 'true'
@@ -351,7 +353,7 @@ jobs:
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: ${{ steps.smoke_node_cache.outputs.kind }}
+          cache: ${{ steps.smoke_node_cache.outputs.kind == 'npm' && 'npm' || steps.smoke_node_cache.outputs.kind == 'yarn' && 'yarn' || '' }}
           cache-dependency-path: ${{ steps.smoke_node_cache.outputs.path }}
 
       - name: Run fixed staging smoke contract
