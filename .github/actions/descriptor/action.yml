@@ -30,6 +30,8 @@ outputs:
     value: ${{ steps.validate.outputs.gitops_production_application }}
   gitops_image_promotion:
     value: ${{ steps.validate.outputs.gitops_image_promotion }}
+  gitops_promotion_mode:
+    value: ${{ steps.validate.outputs.gitops_promotion_mode }}
 runs:
   using: composite
   steps:

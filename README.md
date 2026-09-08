@@ -168,7 +168,12 @@ O `platform-workflows` suporta dois modos de promoção declarados no campo `git
    - O release workflow copia o arquivo com permissão restrita `0600` para a variável de ambiente `DOCKER_CONFIG` do job.
    - **Nenhum usuário ou segredo do Zot precisa ser cadastrado no repositório da aplicação.**
 2. **`PLATFORM_GITOPS_TOKEN`**:
-   - Fine-Grained Personal Access Token (PAT) com permissões restritas de escrita no repositório `k3s-gitops-prod` para atualizar branches de staging e abrir Pull Requests de produção.
+   - Fine-Grained Personal Access Token (PAT) com permissões restritas de escrita no repositório `k3s-gitops-prod` para promover imagens e abrir Pull Requests de produção.
+
+Um descriptor pode declarar `gitops.promotionMode: production-only` quando a
+aplicação não possui ambiente de staging. Nesse modo, o workflow mantém a
+validação no runner ARC, publica a imagem imutável no Zot e abre diretamente o
+Pull Request de produção; os campos e recursos de staging não são necessários.
 3. **GitHub Environments & Approval Gates**:
    - `staging`: Execução automática e não bloqueante.
    - `production-promotion`: Gate natural via Pull Request revisado por humanos.

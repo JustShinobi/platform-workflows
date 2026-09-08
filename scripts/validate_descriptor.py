@@ -27,12 +27,14 @@ COMPONENT_KEYS = {
     "name", "image", "context", "dockerfile", "workload", "container", "target",
     "platforms", "rolloutProfile"
 }
-GITOPS_KEYS = {
-    "repository", "baseBranch", "stagingBranch", "productionBranch", "stagingPath",
-    "productionPath", "stagingApplication", "productionApplication"
+GITOPS_COMMON_KEYS = {
+    "repository", "baseBranch", "productionBranch", "productionPath", "productionApplication"
 }
-GITOPS_OPTIONAL_KEYS = {"imagePromotion"}
+GITOPS_STAGING_KEYS = {"stagingBranch", "stagingPath", "stagingApplication"}
+GITOPS_KEYS = GITOPS_COMMON_KEYS | GITOPS_STAGING_KEYS
+GITOPS_OPTIONAL_KEYS = {"imagePromotion", "promotionMode"}
 IMAGE_PROMOTION_MODES = {"kustomize-images", "chart-values"}
+PROMOTION_MODES = {"staging-and-production", "production-only"}
 
 
 class InvalidDescriptor(ValueError):
@@ -120,16 +122,30 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
             raise InvalidDescriptor(f"{label}.rolloutProfile is invalid")
 
     gitops = _mapping(data["gitops"], "gitops")
-    _keys(gitops, GITOPS_KEYS | GITOPS_OPTIONAL_KEYS, GITOPS_KEYS, "gitops")
+    _keys(gitops, GITOPS_KEYS | GITOPS_OPTIONAL_KEYS, GITOPS_COMMON_KEYS, "gitops")
+    promotion_mode = gitops.get("promotionMode", "staging-and-production")
+    if promotion_mode not in PROMOTION_MODES:
+        raise InvalidDescriptor("gitops.promotionMode must be staging-and-production or production-only")
+    if promotion_mode == "staging-and-production" and not GITOPS_STAGING_KEYS <= set(gitops):
+        raise InvalidDescriptor("gitops is missing staging keys for staging-and-production")
+    if promotion_mode == "production-only" and set(gitops) & GITOPS_STAGING_KEYS:
+        raise InvalidDescriptor("gitops staging keys are not allowed for production-only")
     if gitops.get("imagePromotion", "kustomize-images") not in IMAGE_PROMOTION_MODES:
         raise InvalidDescriptor("gitops.imagePromotion must be kustomize-images or chart-values")
     _string(gitops["repository"], "gitops.repository", REPOSITORY)
-    for key in ("baseBranch", "stagingBranch", "productionBranch"):
+    for key in ("baseBranch", "productionBranch"):
         _string(gitops[key], f"gitops.{key}", REF)
-    for key in ("stagingPath", "productionPath"):
+    for key in ("productionPath",):
         _relative_path(gitops[key], f"gitops.{key}")
-    for key in ("stagingApplication", "productionApplication"):
+    for key in ("productionApplication",):
         _string(gitops[key], f"gitops.{key}", APP_NAME)
+    if promotion_mode == "staging-and-production":
+        for key in ("stagingBranch",):
+            _string(gitops[key], f"gitops.{key}", REF)
+        for key in ("stagingPath",):
+            _relative_path(gitops[key], f"gitops.{key}")
+        for key in ("stagingApplication",):
+            _string(gitops[key], f"gitops.{key}", APP_NAME)
     return data
 
 
@@ -168,14 +184,15 @@ def main() -> int:
         values = {
             "application": data["application"], "matrix": rendered,
             "gitops_repository": gitops["repository"], "gitops_base_branch": gitops["baseBranch"],
-            "gitops_staging_branch": gitops["stagingBranch"],
+            "gitops_staging_branch": gitops.get("stagingBranch", ""),
             "gitops_production_branch": gitops["productionBranch"],
-            "gitops_staging_path": gitops["stagingPath"],
+            "gitops_staging_path": gitops.get("stagingPath", ""),
             "gitops_production_path": gitops["productionPath"],
-            "gitops_staging_application": gitops["stagingApplication"],
+            "gitops_staging_application": gitops.get("stagingApplication", ""),
             "gitops_production_application": gitops["productionApplication"],
             "gitops_repository_name": gitops["repository"].split("/", 1)[1],
             "gitops_image_promotion": gitops.get("imagePromotion", "kustomize-images"),
+            "gitops_promotion_mode": gitops.get("promotionMode", "staging-and-production"),
         }
         with args.github_output.open("a", encoding="utf-8") as output:
             for key, value in values.items():
