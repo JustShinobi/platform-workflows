@@ -73,6 +73,27 @@ class DescriptorTests(unittest.TestCase):
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
             self.assertEqual(data["gitops"]["imagePromotion"], "chart-values")
 
+    def test_accepts_production_only_promotion(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"] = {
+            "repository": "JustShinobi/k3s-gitops-prod",
+            "baseBranch": "main",
+            "productionBranch": "main",
+            "productionPath": "applications/example/overlays/prod",
+            "productionApplication": "prd-example",
+            "promotionMode": "production-only",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertEqual(data["gitops"]["promotionMode"], "production-only")
+
+    def test_rejects_staging_keys_for_production_only(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"]["promotionMode"] = "production-only"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "staging keys"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
     def test_rejects_unknown_image_promotion(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
         value["gitops"]["imagePromotion"] = "arbitrary"

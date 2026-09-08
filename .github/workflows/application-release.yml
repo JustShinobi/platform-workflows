@@ -49,6 +49,7 @@ jobs:
       gitops_production_path: ${{ steps.descriptor.outputs.gitops_production_path }}
       gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
       image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
+      promotion_mode: ${{ steps.descriptor.outputs.gitops_promotion_mode }}
     steps:
       - name: Check out application
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
@@ -243,6 +244,7 @@ jobs:
 
   promote-staging:
     name: Promote immutable digests to staging
+    if: needs.prepare.outputs.promotion_mode != 'production-only'
     needs: [prepare, build]
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 20
@@ -369,6 +371,9 @@ jobs:
   propose-production:
     name: Open production promotion PR
     needs: [prepare, promote-staging]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped')
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 15
     steps:
@@ -400,6 +405,7 @@ jobs:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ github.sha }}
           BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          PROMOTION_MODE: ${{ needs.prepare.outputs.promotion_mode }}
         run: |
           set -euo pipefail
           branch="promote/${APPLICATION}/${SOURCE_SHA}"
@@ -431,8 +437,11 @@ jobs:
             if (!head) return;
             const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
             if (existing.data.length) return;
+            const validation = process.env.PROMOTION_MODE === 'production-only'
+              ? 'validated by the repository verification checks'
+              : 'validated in staging';
             await github.rest.pulls.create({
               owner, repo, head, base: process.env.BASE_BRANCH,
               title: `chore(${process.env.APPLICATION}): promote ${process.env.SOURCE_SHA.slice(0, 12)} to production`,
-              body: `Promotes the exact image digests validated in staging.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              body: `Promotes the exact image digests ${validation}.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
