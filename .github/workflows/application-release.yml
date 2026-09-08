@@ -56,7 +56,7 @@ jobs:
 
       - name: Validate delivery contract
         id: descriptor
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@25737ffd3db33a4492eba241cddb3c1893ff526a
         with:
           descriptor: ${{ inputs.descriptor }}
 
