@@ -198,12 +198,62 @@ jobs:
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }}
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }},mode=max
 
-      - name: Generate SPDX SBOM
+      # The Syft installer is fetched from GitHub at runtime. A transient 503
+      # from that endpoint used to fail the whole release after the image had
+      # already been published. Keep the evidence mandatory, but give the
+      # download two additional attempts before failing the job.
+      - name: Generate SPDX SBOM (attempt 1)
+        id: sbom_attempt_1
+        continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
           format: spdx-json
           output-file: sbom-${{ matrix.name }}.spdx.json
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Wait before SPDX SBOM retry
+        if: steps.sbom_attempt_1.outcome == 'failure'
+        shell: bash
+        run: sleep 15
+
+      - name: Generate SPDX SBOM (attempt 2)
+        id: sbom_attempt_2
+        if: steps.sbom_attempt_1.outcome == 'failure'
+        continue-on-error: true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Wait before final SPDX SBOM retry
+        if: steps.sbom_attempt_2.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - name: Generate SPDX SBOM (attempt 3)
+        id: sbom_attempt_3
+        if: steps.sbom_attempt_2.outcome == 'failure'
+        continue-on-error: true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Validate SPDX SBOM evidence
+        if: always()
+        shell: bash
+        run: test -s "sbom-${{ matrix.name }}.spdx.json"
 
       - name: Scan published candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -390,6 +440,32 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Prepare production promotion branch
+        id: production
+        working-directory: gitops
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          branch="promote/${APPLICATION}/${SOURCE_SHA}"
+          git config user.name "platform-delivery[bot]"
+          git config user.email "platform-delivery[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch -C "$branch" "origin/$branch"
+            echo "Reusing existing production promotion branch $branch"
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "Could not determine whether production promotion branch $branch exists" >&2
+              exit "$status"
+            fi
+            git switch -c "$branch"
+          fi
+          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+
       - name: Update production image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
         with:
@@ -397,29 +473,24 @@ jobs:
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
 
-      - name: Push promotion branch and open pull request
-        id: production
+      - name: Commit production promotion
         working-directory: gitops
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ github.sha }}
-          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
-          PROMOTION_MODE: ${{ needs.prepare.outputs.promotion_mode }}
+          BRANCH: ${{ steps.production.outputs.branch }}
         run: |
           set -euo pipefail
-          branch="promote/${APPLICATION}/${SOURCE_SHA}"
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          git switch -c "$branch"
           git add -- "${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}"
           if git diff --cached --quiet; then
             echo "Production already references these digests"
             exit 0
           fi
           git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to production"
-          git push origin "$branch"
-          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+          git push origin "$BRANCH"
 
       - name: Open production pull request
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
