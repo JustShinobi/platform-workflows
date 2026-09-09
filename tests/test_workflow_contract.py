@@ -37,6 +37,21 @@ class WorkflowContractTests(unittest.TestCase):
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         self.assertRegex(release, r"uses: aquasecurity/trivy-action@[^\s]+[^\n]*\n\s+with:\n\s+version: v\d+\.\d+\.\d+")
 
+    def test_sbom_evidence_retries_transient_download_failures(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertEqual(release.count("uses: anchore/sbom-action@"), 3)
+        self.assertEqual(release.count("upload-artifact: false"), 3)
+        self.assertEqual(release.count("upload-release-assets: false"), 3)
+        self.assertIn("Validate SPDX SBOM evidence", release)
+
+    def test_production_promotion_reuses_an_existing_branch(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertIn("Prepare production promotion branch", release)
+        self.assertIn('git ls-remote --exit-code --heads origin "$branch"', release)
+        self.assertIn('git switch -C "$branch" "origin/$branch"', release)
+        self.assertIn("Production already references these digests", release)
+        self.assertIn("printf 'branch=%s\\n' \"$branch\" >> \"$GITHUB_OUTPUT\"", release)
+
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")
         self.assertNotIn('"command"', validator)
