@@ -56,6 +56,34 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
 
+    def test_t14_release_pins_actions_with_workflow_revision_support(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        provenance_revision = "b282ff4cee929496450d58a2909c8ad28b84b9fc"
+        descriptor = (
+            "JustShinobi/platform-workflows/.github/actions/descriptor@"
+            + provenance_revision
+        )
+        updater = (
+            "JustShinobi/platform-workflows/.github/actions/update-gitops-images@"
+            + provenance_revision
+        )
+        self.assertIn(f"uses: {descriptor}", release)
+        update_uses = re.findall(
+            r"uses: (JustShinobi/platform-workflows/\.github/actions/update-gitops-images@\S+)",
+            release,
+        )
+        self.assertEqual(update_uses, [updater] * 3)
+        self.assertIn(
+            "t14_baseline_workflow_sha:",
+            (ROOT / ".github/actions/descriptor/action.yml").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "t14-baseline-workflow-sha:",
+            (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_t14_publication_only_mode_is_explicit_when_application_is_absent(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         activation = release.split("- name: Detect T14 Application activation", 1)[1]
