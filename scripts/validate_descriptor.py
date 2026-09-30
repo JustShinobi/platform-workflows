@@ -19,6 +19,8 @@ APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 IMAGE = re.compile(r"^registry\.lan\.kyo\.ninja/[a-z0-9._/-]+$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
+ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+RUN_ID = re.compile(r"^[0-9]{1,20}$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 TARGET = re.compile(r"^[A-Za-z0-9_.-]+$")
 PLATFORMS = {"linux/amd64", "linux/arm64"}
@@ -54,6 +56,9 @@ T14_ENABLED_KEYS = {
     "imageComponent",
     "sharedComponents",
     "baselineSourceSha",
+    "baselineRepository",
+    "baselineRunId",
+    "baselineArtifactName",
 }
 T14_DISABLED_KEYS = {"enabled", "blockReason"}
 
@@ -205,6 +210,9 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
         ):
             raise InvalidDescriptor("t14.sharedComponents must name distinct non-arm components")
         _string(t14["baselineSourceSha"], "t14.baselineSourceSha", GIT_SHA)
+        _string(t14["baselineRepository"], "t14.baselineRepository", REPOSITORY)
+        _string(t14["baselineRunId"], "t14.baselineRunId", RUN_ID)
+        _string(t14["baselineArtifactName"], "t14.baselineArtifactName", ARTIFACT_NAME)
     return data
 
 
@@ -260,6 +268,9 @@ def main() -> int:
             "t14_image_component": data.get("t14", {}).get("imageComponent", ""),
             "t14_shared_components": ",".join(data.get("t14", {}).get("sharedComponents", [])),
             "t14_baseline_source_sha": data.get("t14", {}).get("baselineSourceSha", ""),
+            "t14_baseline_repository": data.get("t14", {}).get("baselineRepository", ""),
+            "t14_baseline_run_id": data.get("t14", {}).get("baselineRunId", ""),
+            "t14_baseline_artifact_name": data.get("t14", {}).get("baselineArtifactName", ""),
         }
         with args.github_output.open("a", encoding="utf-8") as output:
             for key, value in values.items():

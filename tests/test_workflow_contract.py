@@ -38,18 +38,35 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("--lock-file uv.lock", release)
         self.assertIn("--oci-layout", release)
         self.assertIn("--image-digest \"$T14_IMAGE_DIGEST\"", release)
+        self.assertIn("push: true", release)
+        self.assertIn("type=oci,dest=.ci/t14/oci-", release)
         self.assertIn("test \"${#targets[@]}\" -eq 6", release)
         self.assertIn('if [ "$target" = baseline ]; then', release)
         self.assertIn('test "$proposed_count" -eq 5', release)
         self.assertIn("name: t14-builder-proof-${{ matrix.name }}", release)
 
-    def test_t14_promotion_is_blocked_without_a_separate_baseline_build(self) -> None:
+    def test_t14_promotion_consumes_a_pinned_cross_repository_baseline_build(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        self.assertIn("Block T14 until a separate historical baseline build is available", release)
-        self.assertIn("T14 release is blocked", release)
+        self.assertNotIn("Block T14 until a separate historical baseline build is available", release)
+        self.assertIn("t14_baseline_repository", release)
+        self.assertIn("t14_baseline_run_id", release)
+        self.assertIn("t14_baseline_artifact_name", release)
         self.assertIn("t14-baseline-release-file", release)
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
+
+    def test_t14_baseline_fetch_binds_artifact_to_run_and_source_sha(self) -> None:
+        action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/runs/$T14_BASELINE_RUN_ID/artifacts", action)
+        self.assertIn("workflow_run.id", action)
+        self.assertIn("workflow_run.head_sha", action)
+        self.assertIn("validate_t14_baseline_artifact.py", action)
+        self.assertIn("docker load --input", action)
+        self.assertIn("docker push", action)
+        self.assertIn('test "$loaded_image" = "$baseline_digest"', action)
+        self.assertIn("pushed_digest", action)
+        self.assertIn('test "$remote_digest" = "$baseline_digest"', action)
+        self.assertIn("T14_BASELINE_SOURCE_SHA", action)
 
     def test_t14_image_action_requires_proof_inputs_before_writing_images(self) -> None:
         action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
@@ -63,6 +80,7 @@ class WorkflowContractTests(unittest.TestCase):
             '[ -z "$T14_BASELINE_SOURCE_SHA" ]',
             '[ -z "$T14_PROPOSED_SOURCE_SHA" ]',
             '[ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ]',
+            '[ -z "$T14_BASELINE_RELEASE_FILE" ]',
             'test -d "$T14_PROOF_DIRECTORY"',
             'test -s "$T14_BUILDER_PUBLIC_KEY_FILE"',
         ):

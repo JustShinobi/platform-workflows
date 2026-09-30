@@ -133,6 +133,9 @@ class DescriptorTests(unittest.TestCase):
             "imageComponent": "api",
             "sharedComponents": ["proxy"],
             "baselineSourceSha": "a" * 40,
+            "baselineRepository": "JustShinobi/ninjasre-t14-baseline",
+            "baselineRunId": "123456789",
+            "baselineArtifactName": "t14-baseline-release",
         }
         with tempfile.TemporaryDirectory() as directory:
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
@@ -153,6 +156,9 @@ class DescriptorTests(unittest.TestCase):
             "imageComponent": "api",
             "sharedComponents": ["proxy"],
             "baselineSourceSha": "a" * 40,
+            "baselineRepository": "JustShinobi/ninjasre-t14-baseline",
+            "baselineRunId": "123456789",
+            "baselineArtifactName": "t14-baseline-release",
         }
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(InvalidDescriptor, "six approved targets"):
@@ -188,6 +194,36 @@ class DescriptorTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(InvalidDescriptor, "missing keys.*baselineSourceSha"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
+    def test_rejects_an_unpinned_historical_baseline_run(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"].append({
+            **value["components"][0], "name": "proxy", "workload": "example-proxy",
+            "container": "proxy",
+        })
+        value["t14"] = {
+            "enabled": True,
+            "builderKeyId": "t14-builder-2026-09",
+            "builderTargets": [
+                "baseline",
+                "proposed",
+                "proposed-without-relations",
+                "proposed-without-t06_readers",
+                "proposed-without-t07_probes",
+                "proposed-without-t09_planning",
+            ],
+            "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
+            "gitopsApplication": "stg-ninjasre-t14",
+            "imageComponent": "api",
+            "sharedComponents": ["proxy"],
+            "baselineSourceSha": "a" * 40,
+            "baselineRepository": "JustShinobi/ninjasre-t14-baseline",
+            "baselineRunId": "latest",
+            "baselineArtifactName": "t14-baseline-release",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "baselineRunId"):
                 load_and_validate(self.write(Path(directory), value), check_files=False)
 
 

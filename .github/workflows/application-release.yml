@@ -25,6 +25,8 @@ on:
         required: true
       ARGOCD_AUTH_TOKEN:
         required: true
+      T14_BASELINE_TOKEN:
+        required: false
 
 concurrency:
   group: release-${{ github.repository }}
@@ -58,6 +60,9 @@ jobs:
       t14_image_component: ${{ steps.descriptor.outputs.t14_image_component }}
       t14_shared_components: ${{ steps.descriptor.outputs.t14_shared_components }}
       t14_baseline_source_sha: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+      t14_baseline_repository: ${{ steps.descriptor.outputs.t14_baseline_repository }}
+      t14_baseline_run_id: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
+      t14_baseline_artifact_name: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
     steps:
       - name: Check out application
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
@@ -82,15 +87,22 @@ jobs:
             *) echo "executor must be arc, t14, or jit" >&2; exit 2 ;;
           esac
 
-      - name: Block T14 until a separate historical baseline build is available
+      - name: Validate T14 historical baseline coordinates
         if: steps.descriptor.outputs.t14_enabled == 'true'
         shell: bash
         env:
           BASELINE_SOURCE_SHA: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+          BASELINE_REPOSITORY: ${{ steps.descriptor.outputs.t14_baseline_repository }}
+          BASELINE_RUN_ID: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
+          BASELINE_ARTIFACT_NAME: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
+          BASELINE_TOKEN: ${{ secrets.T14_BASELINE_TOKEN }}
         run: |
           set -euo pipefail
-          echo "T14 release is blocked: baseline $BASELINE_SOURCE_SHA must be built and attested separately from the proposed source before promotion." >&2
-          exit 2
+          test -n "$BASELINE_SOURCE_SHA"
+          test -n "$BASELINE_REPOSITORY"
+          test -n "$BASELINE_RUN_ID"
+          test -n "$BASELINE_ARTIFACT_NAME"
+          test -n "$BASELINE_TOKEN"
 
   verify:
     name: Verify trusted source
@@ -411,12 +423,17 @@ jobs:
           path: t14-proofs
           merge-multiple: true
 
-      - name: Download T14 historical baseline release
+      - name: Verify mounted Zot credentials for T14 baseline publication
         if: needs.prepare.outputs.t14_enabled == 'true'
-        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317 # v8.0.1
-        with:
-          name: t14-baseline-release
-          path: t14-baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s /run/secrets/zot/config.json
+          docker_config="$RUNNER_TEMP/.docker"
+          install -d -m 0700 "$docker_config"
+          install -m 0600 /run/secrets/zot/config.json "$docker_config/config.json"
+          grep --fixed-strings --quiet 'registry.lan.kyo.ninja' "$docker_config/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
 
       - name: Update staging image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
@@ -434,12 +451,16 @@ jobs:
           t14-targets: ${{ needs.prepare.outputs.t14_builder_targets }}
           t14-component: ${{ needs.prepare.outputs.t14_image_component }}
           t14-shared-components: ${{ needs.prepare.outputs.t14_shared_components }}
-          t14-baseline-release-file: t14-baseline/release-t14-baseline-app.json
+          t14-baseline-release-file: ${{ runner.temp }}/t14-baseline/release-t14-baseline-app.fragment.json
           t14-proof-directory: t14-proofs
           t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
           t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
           t14-proposed-source-sha: ${{ github.sha }}
           t14-builder-public-key-file: /run/secrets/t14/builder-key/public-key
+          t14-baseline-repository: ${{ needs.prepare.outputs.t14_baseline_repository }}
+          t14-baseline-run-id: ${{ needs.prepare.outputs.t14_baseline_run_id }}
+          t14-baseline-artifact-name: ${{ needs.prepare.outputs.t14_baseline_artifact_name }}
+          t14-baseline-token: ${{ secrets.T14_BASELINE_TOKEN }}
 
       - name: Stage T14 builder proofs with the image promotion
         if: needs.prepare.outputs.t14_enabled == 'true'
