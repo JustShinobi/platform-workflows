@@ -54,6 +54,8 @@ outputs:
     value: ${{ steps.validate.outputs.t14_baseline_run_id }}
   t14_baseline_artifact_name:
     value: ${{ steps.validate.outputs.t14_baseline_artifact_name }}
+  t14_only_components:
+    value: ${{ steps.validate.outputs.t14_only_components }}
 runs:
   using: composite
   steps:

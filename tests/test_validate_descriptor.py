@@ -59,6 +59,21 @@ class DescriptorTests(unittest.TestCase):
             path = self.write(root, VALID)
             data = load_and_validate(path, check_files=False)
             self.assertEqual(matrix(data)["include"][0]["platforms"], "linux/amd64")
+            self.assertFalse(matrix(data)["include"][0]["t14_only"])
+
+    def test_accepts_a_t14_only_component(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"][0]["t14Only"] = True
+        with tempfile.TemporaryDirectory() as directory:
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertTrue(matrix(data)["include"][0]["t14_only"])
+
+    def test_rejects_a_non_boolean_t14_only_component(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"][0]["t14Only"] = "true"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "t14Only must be a boolean"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
 
     def test_allows_repository_root_as_context(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
