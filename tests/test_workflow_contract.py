@@ -1,5 +1,8 @@
+import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -67,6 +70,49 @@ class WorkflowContractTests(unittest.TestCase):
         validation_index = apply_step.index("validate_t14_promotion.py")
         self.assertLess(validation_index, write_index)
         self.assertNotIn('if [ -n "$T14_PROOF_DIRECTORY" ]; then', apply_step)
+
+    def test_t14_image_action_rejects_omitted_proof_directory_before_mutation(self) -> None:
+        import yaml
+
+        action_data = yaml.safe_load(
+            (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        run = action_data["runs"]["steps"][-1]["run"].replace(
+            "${{ github.action_path }}", str(ROOT / ".github/actions/update-gitops-images")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images.yaml"
+            images.write_text("sentinel\n", encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "IMAGES_FILE": str(images),
+                    "RELEASE_DIRECTORY": str(root / "release"),
+                    "T14_TARGETS": "baseline proposed",
+                    "T14_COMPONENT": "app",
+                    "T14_SHARED_COMPONENTS": "",
+                    "T14_BASELINE_RELEASE_FILE": str(root / "baseline.json"),
+                    "T14_PROOF_DIRECTORY": "",
+                    "T14_BUILDER_KEY_ID": "builder",
+                    "T14_BASELINE_SOURCE_SHA": "a" * 40,
+                    "T14_PROPOSED_SOURCE_SHA": "b" * 40,
+                    "T14_BUILDER_PUBLIC_KEY_FILE": str(root / "builder.pub"),
+                }
+            )
+            result = subprocess.run(
+                ["bash", "-c", run],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(images.read_text(encoding="utf-8"), "sentinel\n")
 
     def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml"):
