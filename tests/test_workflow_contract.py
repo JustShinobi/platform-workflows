@@ -197,8 +197,7 @@ class WorkflowContractTests(unittest.TestCase):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             text = path.read_text(encoding="utf-8")
             if path.name == "self-test.yml":
-                self.assertIn("runs-on: ubuntu-latest", text)
-                continue
+                self.assertIn("runs-on: arc-k3s-platform-workflows", text)
             self.assertNotIn("runs-on: ubuntu", text, f"{path.name} still uses runs-on: ubuntu")
 
     def test_trivy_binary_version_is_explicit(self) -> None:
