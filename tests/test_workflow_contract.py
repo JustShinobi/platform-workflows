@@ -48,6 +48,26 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
 
+    def test_t14_image_action_requires_proof_inputs_before_writing_images(self) -> None:
+        action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
+            encoding="utf-8"
+        )
+        apply_step = action.split("      run: |", 1)[1]
+        write_index = apply_step.index('          "${command[@]}"')
+        for guard in (
+            'if [ -z "$T14_PROOF_DIRECTORY" ]',
+            '[ -z "$T14_BUILDER_KEY_ID" ]',
+            '[ -z "$T14_BASELINE_SOURCE_SHA" ]',
+            '[ -z "$T14_PROPOSED_SOURCE_SHA" ]',
+            '[ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ]',
+            'test -d "$T14_PROOF_DIRECTORY"',
+            'test -s "$T14_BUILDER_PUBLIC_KEY_FILE"',
+        ):
+            self.assertLess(apply_step.index(guard), write_index, guard)
+        validation_index = apply_step.index("validate_t14_promotion.py")
+        self.assertLess(validation_index, write_index)
+        self.assertNotIn('if [ -n "$T14_PROOF_DIRECTORY" ]; then', apply_step)
+
     def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             text = path.read_text(encoding="utf-8")

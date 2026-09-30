@@ -74,6 +74,15 @@ runs:
       run: |
         set -euo pipefail
         if [ -n "$T14_TARGETS" ]; then
+          if [ -z "$T14_PROOF_DIRECTORY" ] || [ -z "$T14_BUILDER_KEY_ID" ] || \
+             [ -z "$T14_BASELINE_SOURCE_SHA" ] || [ -z "$T14_PROPOSED_SOURCE_SHA" ] || \
+             [ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ]; then
+            echo "T14 promotion requires builder proof directory, key ID, source SHAs, and public key" >&2
+            exit 2
+          fi
+          test -d "$T14_PROOF_DIRECTORY"
+          test -s "$T14_BUILDER_PUBLIC_KEY_FILE"
+          test -s "$T14_BASELINE_RELEASE_FILE"
           # The descriptor validates this list before the reusable workflow
           # starts; passing it as separate argv values keeps target names out
           # of shell interpolation.
@@ -90,21 +99,15 @@ runs:
           if [ -n "$T14_BASELINE_RELEASE_FILE" ]; then
             command+=(--t14-baseline-release-file "$T14_BASELINE_RELEASE_FILE")
           fi
+          python3 "${{ github.action_path }}/../../../scripts/validate_t14_promotion.py" \
+            --proof-directory "$T14_PROOF_DIRECTORY" \
+            --baseline-release-file "$T14_BASELINE_RELEASE_FILE" \
+            --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
+            --baseline-source-sha "$T14_BASELINE_SOURCE_SHA" \
+            --proposed-source-sha "$T14_PROPOSED_SOURCE_SHA" \
+            --builder-key-id "$T14_BUILDER_KEY_ID" \
+            --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE"
           "${command[@]}"
-          if [ -n "$T14_PROOF_DIRECTORY" ]; then
-            test -n "$T14_BUILDER_KEY_ID"
-            test -n "$T14_BASELINE_SOURCE_SHA"
-            test -n "$T14_PROPOSED_SOURCE_SHA"
-            test -s "$T14_BUILDER_PUBLIC_KEY_FILE"
-            python3 "${{ github.action_path }}/../../../scripts/validate_t14_promotion.py" \
-              --proof-directory "$T14_PROOF_DIRECTORY" \
-              --baseline-release-file "$T14_BASELINE_RELEASE_FILE" \
-              --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
-              --baseline-source-sha "$T14_BASELINE_SOURCE_SHA" \
-              --proposed-source-sha "$T14_PROPOSED_SOURCE_SHA" \
-              --builder-key-id "$T14_BUILDER_KEY_ID" \
-              --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE"
-          fi
         else
           python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
             "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
