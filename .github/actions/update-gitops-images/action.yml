@@ -11,6 +11,58 @@ inputs:
     description: Target file kind (kustomize images.yaml or chart-values)
     required: false
     default: kustomize
+  t14-targets:
+    description: Ordered T14 arm names to update by pod-template label
+    required: false
+    default: ''
+  t14-component:
+    description: Component/container name shared by the T14 arm Deployments
+    required: false
+    default: app
+  t14-shared-components:
+    description: Shared T14 component/container names updated from release fragments
+    required: false
+    default: ''
+  t14-baseline-release-file:
+    description: Separate historical baseline release fragment for the baseline arm
+    required: false
+    default: ''
+  t14-proof-directory:
+    description: Directory containing the six T14 builder proofs
+    required: false
+    default: ''
+  t14-builder-key-id:
+    description: Descriptor-pinned T14 builder key id
+    required: false
+    default: ''
+  t14-baseline-source-sha:
+    description: Historical source SHA bound to the baseline proof
+    required: false
+    default: ''
+  t14-proposed-source-sha:
+    description: Current source SHA bound to proposal proofs
+    required: false
+    default: ''
+  t14-builder-public-key-file:
+    description: External pinned Ed25519 public key for builder proof verification
+    required: false
+    default: ''
+  t14-baseline-repository:
+    description: Repository that owns the pinned historical baseline workflow run
+    required: false
+    default: ''
+  t14-baseline-run-id:
+    description: Immutable workflow run ID that produced the baseline artifact
+    required: false
+    default: ''
+  t14-baseline-artifact-name:
+    description: Exact artifact name expected from the pinned baseline run
+    required: false
+    default: ''
+  t14-baseline-token:
+    description: Token with actions read permission for the baseline repository
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -20,10 +72,153 @@ runs:
         python-version: '3.12'
     - name: Install pinned parser dependency
       shell: bash
-      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2
+      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2 cryptography==50.0.0
+    - name: Fetch, verify, and publish the historical T14 baseline
+      if: inputs.t14-targets != ''
+      shell: bash
+      env:
+        T14_TARGETS: ${{ inputs.t14-targets }}
+        T14_COMPONENT: ${{ inputs.t14-component }}
+        RELEASE_DIRECTORY: ${{ inputs.release-directory }}
+        T14_PROOF_DIRECTORY: ${{ inputs.t14-proof-directory }}
+        T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
+        T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
+        T14_BUILDER_PUBLIC_KEY_FILE: ${{ inputs.t14-builder-public-key-file }}
+        T14_BASELINE_REPOSITORY: ${{ inputs.t14-baseline-repository }}
+        T14_BASELINE_RUN_ID: ${{ inputs.t14-baseline-run-id }}
+        T14_BASELINE_ARTIFACT_NAME: ${{ inputs.t14-baseline-artifact-name }}
+        T14_BASELINE_TOKEN: ${{ inputs.t14-baseline-token }}
+      run: |
+        set -euo pipefail
+        if [ -z "$T14_BASELINE_REPOSITORY" ] || [ -z "$T14_BASELINE_RUN_ID" ] || \
+           [ -z "$T14_BASELINE_ARTIFACT_NAME" ] || [ -z "$T14_BASELINE_TOKEN" ]; then
+          echo "T14 promotion requires a pinned baseline repository, run, artifact, and read token" >&2
+          exit 2
+        fi
+        if [ -z "$T14_BASELINE_SOURCE_SHA" ] || [ -z "$T14_BUILDER_KEY_ID" ] || \
+           [ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ] || [ -z "$T14_PROOF_DIRECTORY" ]; then
+          echo "T14 promotion requires baseline identity and proof verification inputs" >&2
+          exit 2
+        fi
+        test -d "$T14_PROOF_DIRECTORY"
+        test -s "$T14_BUILDER_PUBLIC_KEY_FILE"
+        baseline_directory="$RUNNER_TEMP/t14-baseline"
+        metadata_file="$RUNNER_TEMP/t14-baseline-artifacts.json"
+        archive_file="$RUNNER_TEMP/t14-baseline-artifact.zip"
+        rm -rf "$baseline_directory"
+        mkdir -p "$baseline_directory"
+        GH_TOKEN="$T14_BASELINE_TOKEN" gh api \
+          --header 'Accept: application/vnd.github+json' \
+          "repos/$T14_BASELINE_REPOSITORY/actions/runs/$T14_BASELINE_RUN_ID/artifacts?per_page=100" \
+          > "$metadata_file"
+        match_count="$(jq -r --arg name "$T14_BASELINE_ARTIFACT_NAME" \
+          --arg run_id "$T14_BASELINE_RUN_ID" --arg source_sha "$T14_BASELINE_SOURCE_SHA" '
+          [.artifacts[]? | select(
+            .name == $name and .expired == false and
+            ((.workflow_run.id // 0) | tostring) == $run_id and
+            .workflow_run.head_sha == $source_sha and
+            ((.size_in_bytes // 0) | tonumber) > 0
+          )] | length' "$metadata_file")"
+        test "$match_count" -eq 1
+        artifact_id="$(jq -r --arg name "$T14_BASELINE_ARTIFACT_NAME" \
+          --arg run_id "$T14_BASELINE_RUN_ID" --arg source_sha "$T14_BASELINE_SOURCE_SHA" '
+          .artifacts[] | select(
+            .name == $name and .expired == false and
+            ((.workflow_run.id // 0) | tostring) == $run_id and
+            .workflow_run.head_sha == $source_sha and
+            ((.size_in_bytes // 0) | tonumber) > 0
+          ) | .id' "$metadata_file")"
+        test "$artifact_id" != null
+        GH_TOKEN="$T14_BASELINE_TOKEN" gh api \
+          --header 'Accept: application/vnd.github+json' \
+          --output "$archive_file" \
+          "repos/$T14_BASELINE_REPOSITORY/actions/artifacts/$artifact_id/zip"
+        unzip -q "$archive_file" -d "$baseline_directory"
+        baseline_release="$baseline_directory/release-t14-baseline-app.fragment.json"
+        python3 "${{ github.action_path }}/../../../scripts/validate_t14_baseline_artifact.py" \
+          --artifact-directory "$baseline_directory" \
+          --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
+          --expected-source-sha "$T14_BASELINE_SOURCE_SHA" \
+          --builder-key-id "$T14_BUILDER_KEY_ID" \
+          --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE" \
+          --output-release-file "$baseline_release"
+        baseline_proof="$(find "$baseline_directory" -type f \
+          -name 'release-t14-baseline.builder.dsse' -print -quit)"
+        test -n "$baseline_proof"
+        install -m 0644 "$baseline_proof" "$T14_PROOF_DIRECTORY/baseline.dsse"
+        baseline_image="$(jq -er '.image' "$baseline_release")"
+        baseline_digest="$(jq -er '.digest' "$baseline_release")"
+        baseline_tag="${baseline_image}:t14-baseline-${T14_BASELINE_SOURCE_SHA}"
+        loaded_image="$(docker load --input "$(find "$baseline_directory" -type f \
+          -name 'release-t14-baseline-app.oci.tar' -print -quit)" | \
+          sed -n 's/^Loaded image ID: //p')"
+        if [[ ! "$loaded_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "T14 baseline OCI archive did not load as one immutable image" >&2
+          exit 2
+        fi
+        test "$loaded_image" = "$baseline_digest"
+        docker tag "$loaded_image" "$baseline_tag"
+        push_output="$(docker push "$baseline_tag" 2>&1)" || {
+          printf '%s\n' "$push_output" >&2
+          exit 1
+        }
+        pushed_digest="$(printf '%s\n' "$push_output" | awk '$1 == "digest:" {print $2; exit}')"
+        test "$pushed_digest" = "$baseline_digest"
+        remote_digest="$(docker buildx imagetools inspect "$baseline_tag" 2>/dev/null | \
+          awk '$1 == "Digest:" {print $2; exit}')"
+        test "$remote_digest" = "$baseline_digest"
     - name: Apply immutable digests
       shell: bash
       env:
         IMAGES_FILE: ${{ inputs.images-file }}
         RELEASE_DIRECTORY: ${{ inputs.release-directory }}
-      run: python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
+        T14_TARGETS: ${{ inputs.t14-targets }}
+        T14_COMPONENT: ${{ inputs.t14-component }}
+        T14_SHARED_COMPONENTS: ${{ inputs.t14-shared-components }}
+        T14_BASELINE_RELEASE_FILE: ${{ inputs.t14-baseline-release-file }}
+        T14_PROOF_DIRECTORY: ${{ inputs.t14-proof-directory }}
+        T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
+        T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
+        T14_PROPOSED_SOURCE_SHA: ${{ inputs.t14-proposed-source-sha }}
+        T14_BUILDER_PUBLIC_KEY_FILE: ${{ inputs.t14-builder-public-key-file }}
+      run: |
+        set -euo pipefail
+        if [ -n "$T14_TARGETS" ]; then
+          if [ -z "$T14_PROOF_DIRECTORY" ] || [ -z "$T14_BUILDER_KEY_ID" ] || \
+             [ -z "$T14_BASELINE_SOURCE_SHA" ] || [ -z "$T14_PROPOSED_SOURCE_SHA" ] || \
+             [ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ] || [ -z "$T14_BASELINE_RELEASE_FILE" ]; then
+            echo "T14 promotion requires builder proof directory, key ID, source SHAs, and public key" >&2
+            exit 2
+          fi
+          test -d "$T14_PROOF_DIRECTORY"
+          test -s "$T14_BUILDER_PUBLIC_KEY_FILE"
+          test -s "$T14_BASELINE_RELEASE_FILE"
+          # The descriptor validates this list before the reusable workflow
+          # starts; passing it as separate argv values keeps target names out
+          # of shell interpolation.
+          targets_text="${T14_TARGETS//,/ }"
+          read -r -a targets <<< "$targets_text"
+          shared_text="${T14_SHARED_COMPONENTS//,/ }"
+          read -r -a shared_components <<< "$shared_text"
+          command=(python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
+            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --t14-targets "${targets[@]}" \
+            --t14-component "$T14_COMPONENT")
+          if [ -n "$T14_SHARED_COMPONENTS" ]; then
+            command+=(--t14-shared-components "${shared_components[@]}")
+          fi
+          if [ -n "$T14_BASELINE_RELEASE_FILE" ]; then
+            command+=(--t14-baseline-release-file "$T14_BASELINE_RELEASE_FILE")
+          fi
+          python3 "${{ github.action_path }}/../../../scripts/validate_t14_promotion.py" \
+            --proof-directory "$T14_PROOF_DIRECTORY" \
+            --baseline-release-file "$T14_BASELINE_RELEASE_FILE" \
+            --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
+            --baseline-source-sha "$T14_BASELINE_SOURCE_SHA" \
+            --proposed-source-sha "$T14_PROPOSED_SOURCE_SHA" \
+            --builder-key-id "$T14_BUILDER_KEY_ID" \
+            --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE"
+          "${command[@]}"
+        else
+          python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
+            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
+        fi

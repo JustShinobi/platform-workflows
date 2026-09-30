@@ -19,10 +19,14 @@ APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 IMAGE = re.compile(r"^registry\.lan\.kyo\.ninja/[a-z0-9._/-]+$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
+ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+RUN_ID = re.compile(r"^[0-9]{1,20}$")
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 TARGET = re.compile(r"^[A-Za-z0-9_.-]+$")
 PLATFORMS = {"linux/amd64", "linux/arm64"}
 ROLLOUT_PROFILES = {"deployment", "bluegreen", "canary"}
-ROOT_KEYS = {"schemaVersion", "application", "components", "gitops"}
+ROOT_KEYS = {"schemaVersion", "application", "components", "gitops", "t14"}
+ROOT_REQUIRED_KEYS = ROOT_KEYS - {"t14"}
 COMPONENT_KEYS = {
     "name", "image", "context", "dockerfile", "workload", "container", "target",
     "platforms", "rolloutProfile"
@@ -35,6 +39,28 @@ GITOPS_KEYS = GITOPS_COMMON_KEYS | GITOPS_STAGING_KEYS
 GITOPS_OPTIONAL_KEYS = {"imagePromotion", "promotionMode"}
 IMAGE_PROMOTION_MODES = {"kustomize-images", "chart-values"}
 PROMOTION_MODES = {"staging-and-production", "production-only"}
+T14_TARGETS = (
+    "baseline",
+    "proposed",
+    "proposed-without-relations",
+    "proposed-without-t06_readers",
+    "proposed-without-t07_probes",
+    "proposed-without-t09_planning",
+)
+T14_ENABLED_KEYS = {
+    "enabled",
+    "builderKeyId",
+    "builderTargets",
+    "gitopsPath",
+    "gitopsApplication",
+    "imageComponent",
+    "sharedComponents",
+    "baselineSourceSha",
+    "baselineRepository",
+    "baselineRunId",
+    "baselineArtifactName",
+}
+T14_DISABLED_KEYS = {"enabled", "blockReason"}
 
 
 class InvalidDescriptor(ValueError):
@@ -83,7 +109,7 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
     except (OSError, yaml.YAMLError) as exc:
         raise InvalidDescriptor(f"cannot load {path}: {exc}") from exc
     data = _mapping(raw, "descriptor")
-    _keys(data, ROOT_KEYS, ROOT_KEYS, "descriptor")
+    _keys(data, ROOT_KEYS, ROOT_REQUIRED_KEYS, "descriptor")
     if data["schemaVersion"] != 1:
         raise InvalidDescriptor("schemaVersion must be 1")
     _string(data["application"], "application", APP_NAME)
@@ -146,6 +172,51 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
             _relative_path(gitops[key], f"gitops.{key}")
         for key in ("stagingApplication",):
             _string(gitops[key], f"gitops.{key}", APP_NAME)
+
+    t14 = data.get("t14")
+    if t14 is not None:
+        t14 = _mapping(t14, "t14")
+        if type(t14.get("enabled")) is not bool:
+            raise InvalidDescriptor("t14.enabled must be a boolean")
+        if not t14["enabled"]:
+            _keys(t14, T14_DISABLED_KEYS, T14_DISABLED_KEYS, "disabled t14")
+            _string(t14["blockReason"], "t14.blockReason", TARGET)
+            return data
+        _keys(t14, T14_ENABLED_KEYS, T14_ENABLED_KEYS, "t14")
+        _string(t14["builderKeyId"], "t14.builderKeyId", TARGET)
+        targets = t14["builderTargets"]
+        if targets != list(T14_TARGETS):
+            raise InvalidDescriptor(
+                "t14.builderTargets must contain the six approved targets in declaration order"
+            )
+        _relative_path(t14["gitopsPath"], "t14.gitopsPath")
+        _string(t14["gitopsApplication"], "t14.gitopsApplication", APP_NAME)
+        component_names = {component["name"] for component in components}
+        _string(t14["imageComponent"], "t14.imageComponent", NAME)
+        if t14["imageComponent"] not in component_names:
+            raise InvalidDescriptor("t14.imageComponent must name a declared component")
+        shared_components = t14["sharedComponents"]
+        if (
+            not isinstance(shared_components, list)
+            or not shared_components
+            or len(shared_components) != len(set(shared_components))
+            or any(
+                not isinstance(component, str)
+                or not NAME.fullmatch(component)
+                or component not in component_names
+                or component == t14["imageComponent"]
+                for component in shared_components
+            )
+        ):
+            raise InvalidDescriptor("t14.sharedComponents must name distinct non-arm components")
+        _string(t14["baselineSourceSha"], "t14.baselineSourceSha", GIT_SHA)
+        _string(t14["baselineRepository"], "t14.baselineRepository", REPOSITORY)
+        _string(t14["baselineRunId"], "t14.baselineRunId", RUN_ID)
+        _string(t14["baselineArtifactName"], "t14.baselineArtifactName", ARTIFACT_NAME)
+        if gitops["stagingBranch"] != gitops["baseBranch"]:
+            raise InvalidDescriptor(
+                "gitops.stagingBranch must match gitops.baseBranch for enabled T14"
+            )
     return data
 
 
@@ -193,6 +264,17 @@ def main() -> int:
             "gitops_repository_name": gitops["repository"].split("/", 1)[1],
             "gitops_image_promotion": gitops.get("imagePromotion", "kustomize-images"),
             "gitops_promotion_mode": gitops.get("promotionMode", "staging-and-production"),
+            "t14_enabled": "true" if data.get("t14", {}).get("enabled", False) else "false",
+            "t14_builder_key_id": data.get("t14", {}).get("builderKeyId", ""),
+            "t14_builder_targets": ",".join(data.get("t14", {}).get("builderTargets", [])),
+            "t14_gitops_path": data.get("t14", {}).get("gitopsPath", ""),
+            "t14_gitops_application": data.get("t14", {}).get("gitopsApplication", ""),
+            "t14_image_component": data.get("t14", {}).get("imageComponent", ""),
+            "t14_shared_components": ",".join(data.get("t14", {}).get("sharedComponents", [])),
+            "t14_baseline_source_sha": data.get("t14", {}).get("baselineSourceSha", ""),
+            "t14_baseline_repository": data.get("t14", {}).get("baselineRepository", ""),
+            "t14_baseline_run_id": data.get("t14", {}).get("baselineRunId", ""),
+            "t14_baseline_artifact_name": data.get("t14", {}).get("baselineArtifactName", ""),
         }
         with args.github_output.open("a", encoding="utf-8") as output:
             for key, value in values.items():
