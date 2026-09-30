@@ -200,6 +200,18 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn("runs-on: arc-k3s-platform-workflows", text)
             self.assertNotIn("runs-on: ubuntu", text, f"{path.name} still uses runs-on: ubuntu")
 
+    def test_platform_pr_validation_requires_a_branch_in_this_repository(self) -> None:
+        workflow = (ROOT / ".github/workflows/self-test.yml").read_text(encoding="utf-8")
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", workflow)
+
+    def test_standalone_secret_sync_uses_the_platform_arc_scale_set(self) -> None:
+        workflow = (ROOT / ".github/workflows/sync-secrets-infisical.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runs-on: arc-k3s-platform-workflows", workflow)
+        self.assertIn("INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}", workflow)
+        self.assertNotIn("secrets.INFISICAL_CLIENT_SECRET ||", workflow)
+
     def test_trivy_binary_version_is_explicit(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         self.assertRegex(release, r"uses: aquasecurity/trivy-action@[^\s]+[^\n]*\n\s+with:\n\s+version: v\d+\.\d+\.\d+")
