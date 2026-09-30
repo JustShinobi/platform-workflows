@@ -12,6 +12,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 
 TARGETS = (
     "baseline",
@@ -25,6 +29,32 @@ PAYLOAD_TYPE = "application/vnd.ninjasre.t14.builder.v1+json"
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    """Return the DSSE pre-authentication encoding for one payload."""
+    type_bytes = payload_type.encode("utf-8")
+    return (
+        b"DSSEv1 "
+        + str(len(type_bytes)).encode("ascii")
+        + b" "
+        + type_bytes
+        + b" "
+        + str(len(payload)).encode("ascii")
+        + b" "
+        + payload
+    )
+
+
+def _public_key(path: Path) -> Ed25519PublicKey:
+    """Load one pinned Ed25519 public key without exposing its bytes."""
+    raw = path.read_bytes()
+    if len(raw) == 32:
+        return Ed25519PublicKey.from_public_bytes(raw)
+    loaded = serialization.load_pem_public_key(raw)
+    if not isinstance(loaded, Ed25519PublicKey):
+        raise ValueError("builder public key is not Ed25519")
+    return loaded
 
 
 def _release(path: Path) -> str:
@@ -48,7 +78,7 @@ def _json(value: object, label: str) -> dict[str, Any]:
     return value
 
 
-def _proof(path: Path, builder_key_id: str) -> dict[str, Any]:
+def _proof(path: Path, builder_key_id: str, public_key: Ed25519PublicKey) -> dict[str, Any]:
     """Decode and structurally validate one builder DSSE envelope."""
     raw = path.read_bytes()
     if not raw or len(raw) > 65_536:
@@ -70,10 +100,13 @@ def _proof(path: Path, builder_key_id: str) -> dict[str, Any]:
             if not isinstance(encoded, str) or not encoded:
                 raise ValueError(f"builder signature is missing {key}: {path}")
             base64.b64decode(encoded, validate=True)
-        statement = _json(
-            json.loads(base64.b64decode(payload, validate=True)),
-            f"builder statement {path}",
-        )
+        payload_bytes = base64.b64decode(payload, validate=True)
+        signature_bytes = base64.b64decode(signature["sig"], validate=True)
+        try:
+            public_key.verify(signature_bytes, _dsse_pae(PAYLOAD_TYPE, payload_bytes))
+        except InvalidSignature as error:
+            raise ValueError(f"builder signature verification failed: {path}") from error
+        statement = _json(json.loads(payload_bytes), f"builder statement {path}")
     except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError, binascii.Error) as error:
         if isinstance(error, ValueError) and str(error).startswith(("builder envelope", "builder signature", "builder statement")):
             raise
@@ -110,6 +143,7 @@ def validate(
     baseline_source_sha: str,
     proposed_source_sha: str,
     builder_key_id: str,
+    builder_public_key_file: Path,
 ) -> None:
     """Raise when six proofs do not bind distinct baseline and proposal artifacts."""
     if GIT_SHA.fullmatch(baseline_source_sha) is None or GIT_SHA.fullmatch(proposed_source_sha) is None:
@@ -119,7 +153,11 @@ def validate(
     files = sorted(proof_directory.glob("*.dsse"))
     if len(files) != len(TARGETS):
         raise ValueError("T14 promotion requires exactly six builder proofs")
-    statements = [_proof(path, builder_key_id) for path in files]
+    try:
+        public_key = _public_key(builder_public_key_file)
+    except (OSError, ValueError, TypeError) as error:
+        raise ValueError("builder public key cannot be loaded") from error
+    statements = [_proof(path, builder_key_id, public_key) for path in files]
     by_target: dict[str, dict[str, Any]] = {}
     for statement in statements:
         target = statement["target_name"]
@@ -156,6 +194,7 @@ def main() -> int:
     parser.add_argument("--baseline-source-sha", required=True)
     parser.add_argument("--proposed-source-sha", required=True)
     parser.add_argument("--builder-key-id", required=True)
+    parser.add_argument("--builder-public-key-file", type=Path, required=True)
     args = parser.parse_args()
     try:
         validate(
@@ -165,6 +204,7 @@ def main() -> int:
             args.baseline_source_sha,
             args.proposed_source_sha,
             args.builder_key_id,
+            args.builder_public_key_file,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"invalid T14 promotion: {error}", file=sys.stderr)

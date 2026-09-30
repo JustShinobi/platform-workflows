@@ -43,6 +43,10 @@ inputs:
     description: Current source SHA bound to proposal proofs
     required: false
     default: ''
+  t14-builder-public-key-file:
+    description: External pinned Ed25519 public key for builder proof verification
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -52,7 +56,7 @@ runs:
         python-version: '3.12'
     - name: Install pinned parser dependency
       shell: bash
-      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2
+      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2 cryptography==50.0.0
     - name: Apply immutable digests
       shell: bash
       env:
@@ -66,6 +70,7 @@ runs:
         T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
         T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
         T14_PROPOSED_SOURCE_SHA: ${{ inputs.t14-proposed-source-sha }}
+        T14_BUILDER_PUBLIC_KEY_FILE: ${{ inputs.t14-builder-public-key-file }}
       run: |
         set -euo pipefail
         if [ -n "$T14_TARGETS" ]; then
@@ -90,13 +95,15 @@ runs:
             test -n "$T14_BUILDER_KEY_ID"
             test -n "$T14_BASELINE_SOURCE_SHA"
             test -n "$T14_PROPOSED_SOURCE_SHA"
+            test -s "$T14_BUILDER_PUBLIC_KEY_FILE"
             python3 "${{ github.action_path }}/../../../scripts/validate_t14_promotion.py" \
               --proof-directory "$T14_PROOF_DIRECTORY" \
               --baseline-release-file "$T14_BASELINE_RELEASE_FILE" \
               --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
               --baseline-source-sha "$T14_BASELINE_SOURCE_SHA" \
               --proposed-source-sha "$T14_PROPOSED_SOURCE_SHA" \
-              --builder-key-id "$T14_BUILDER_KEY_ID"
+              --builder-key-id "$T14_BUILDER_KEY_ID" \
+              --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE"
           fi
         else
           python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \

@@ -439,6 +439,7 @@ jobs:
           t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
           t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
           t14-proposed-source-sha: ${{ github.sha }}
+          t14-builder-public-key-file: /run/secrets/t14/builder-key/public-key
 
       - name: Stage T14 builder proofs with the image promotion
         if: needs.prepare.outputs.t14_enabled == 'true'

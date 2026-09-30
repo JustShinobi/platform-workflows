@@ -46,6 +46,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("T14 release is blocked", release)
         self.assertIn("t14-baseline-release-file", release)
         self.assertIn("t14-proof-directory", release)
+        self.assertIn("t14-builder-public-key-file", release)
 
     def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml"):
