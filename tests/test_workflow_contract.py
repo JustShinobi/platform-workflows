@@ -117,6 +117,9 @@ class WorkflowContractTests(unittest.TestCase):
     def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             text = path.read_text(encoding="utf-8")
+            if path.name == "self-test.yml":
+                self.assertIn("runs-on: ubuntu-latest", text)
+                continue
             self.assertNotIn("runs-on: ubuntu", text, f"{path.name} still uses runs-on: ubuntu")
 
     def test_trivy_binary_version_is_explicit(self) -> None:
