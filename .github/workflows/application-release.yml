@@ -445,6 +445,7 @@ jobs:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
+          allow-missing-components: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.t14_shared_components || '' }}
 
       - name: Update T14 image patches
         if: needs.prepare.outputs.t14_enabled == 'true'
