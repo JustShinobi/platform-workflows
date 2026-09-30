@@ -50,6 +50,14 @@ jobs:
       gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
       image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
       promotion_mode: ${{ steps.descriptor.outputs.gitops_promotion_mode }}
+      t14_enabled: ${{ steps.descriptor.outputs.t14_enabled }}
+      t14_builder_key_id: ${{ steps.descriptor.outputs.t14_builder_key_id }}
+      t14_builder_targets: ${{ steps.descriptor.outputs.t14_builder_targets }}
+      t14_gitops_path: ${{ steps.descriptor.outputs.t14_gitops_path }}
+      t14_gitops_application: ${{ steps.descriptor.outputs.t14_gitops_application }}
+      t14_image_component: ${{ steps.descriptor.outputs.t14_image_component }}
+      t14_shared_components: ${{ steps.descriptor.outputs.t14_shared_components }}
+      t14_baseline_source_sha: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
     steps:
       - name: Check out application
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
@@ -69,9 +77,20 @@ jobs:
           set -euo pipefail
           case "$EXECUTOR" in
             arc) printf 'runner=["arc-k3s"]\n' >> "$GITHUB_OUTPUT" ;;
+            t14) printf 'runner=["arc-k3s-ninjasre-t14"]\n' >> "$GITHUB_OUTPUT" ;;
             jit) printf 'runner=["self-hosted","proxmox-lxc","crossbuild"]\n' >> "$GITHUB_OUTPUT" ;;
-            *) echo "executor must be arc or jit" >&2; exit 2 ;;
+            *) echo "executor must be arc, t14, or jit" >&2; exit 2 ;;
           esac
+
+      - name: Block T14 until a separate historical baseline build is available
+        if: steps.descriptor.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          BASELINE_SOURCE_SHA: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+        run: |
+          set -euo pipefail
+          echo "T14 release is blocked: baseline $BASELINE_SOURCE_SHA must be built and attested separately from the proposed source before promotion." >&2
+          exit 2
 
   verify:
     name: Verify trusted source
@@ -183,6 +202,15 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      - name: Prepare T14 OCI output directory
+        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          rm -rf ".ci/t14/oci-${{ matrix.name }}"
+          mkdir -p ".ci/t14"
+
       - name: Build and publish immutable candidate
         id: image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -192,11 +220,72 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms }}
           push: true
-          provenance: mode=max
-          sbom: true
+          # The signed T14 builder envelope hashes the exact OCI layout below.
+          # BuildKit's default provenance/SBOM exporter wraps the registry
+          # digest in an attestation index but does not copy that index blob to
+          # the local OCI exporter. Keep those two outputs separate: Anchore
+          # emits the SBOM artifact below, while this build emits the exact
+          # single-platform image manifest consumed by the DSSE producer.
+          provenance: false
+          sbom: false
           tags: ${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.name }}
+          outputs: ${{ needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component && format('type=oci,dest=.ci/t14/oci-{0},tar=false', matrix.name) || '' }}
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }}
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }},mode=max
+
+      - name: Set up pinned Python for T14 proof
+        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv for T14 proof
+        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      - name: Produce T14 builder proofs from immutable CI inputs
+        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        shell: bash
+        env:
+          T14_TARGETS: ${{ needs.prepare.outputs.t14_builder_targets }}
+          T14_KEY_ID: ${{ needs.prepare.outputs.t14_builder_key_id }}
+          T14_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          T14_KEY_PATH: /run/secrets/t14/builder-key/private-key
+        run: |
+          set -euo pipefail
+          test -s "$T14_KEY_PATH"
+          test -n "$T14_KEY_ID"
+          test -n "$T14_IMAGE_DIGEST"
+          targets_text="${T14_TARGETS//,/ }"
+          read -r -a targets <<< "$targets_text"
+          test "${#targets[@]}" -eq 6
+          proposed_count=0
+          for target in "${targets[@]}"; do
+            if [ "$target" = baseline ]; then
+              continue
+            fi
+            uv run --frozen --no-dev python tools/t14_builder_attestation.py \
+              --repository-root . \
+              --oci-layout ".ci/t14/oci-${{ matrix.name }}" \
+              --lock-file uv.lock \
+              --target-name "$target" \
+              --image-digest "$T14_IMAGE_DIGEST" \
+              --key-id "$T14_KEY_ID" \
+              --private-key-file "$T14_KEY_PATH" \
+              --output ".ci/t14/builder-proposed-${target}.dsse"
+            proposed_count=$((proposed_count + 1))
+          done
+          test "$proposed_count" -eq 5
+          test "$(find .ci/t14 -maxdepth 1 -name 'builder-proposed-*.dsse' -type f | wc -l)" -eq 5
+
+      - name: Upload T14 builder proofs
+        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: t14-builder-proof-${{ matrix.name }}
+          path: .ci/t14/builder-*.dsse
+          retention-days: 30
+          if-no-files-found: error
 
       # The Syft installer is fetched from GitHub at runtime. A transient 503
       # from that endpoint used to fail the whole release after the image had
@@ -314,12 +403,56 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Download T14 builder proofs
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317 # v8.0.1
+        with:
+          pattern: t14-builder-proof-*
+          path: t14-proofs
+          merge-multiple: true
+
+      - name: Download T14 historical baseline release
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317 # v8.0.1
+        with:
+          name: t14-baseline-release
+          path: t14-baseline
+
       - name: Update staging image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
+
+      - name: Update T14 image patches
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        with:
+          images-file: gitops/${{ needs.prepare.outputs.t14_gitops_path }}/images.yaml
+          release-directory: release
+          t14-targets: ${{ needs.prepare.outputs.t14_builder_targets }}
+          t14-component: ${{ needs.prepare.outputs.t14_image_component }}
+          t14-shared-components: ${{ needs.prepare.outputs.t14_shared_components }}
+          t14-baseline-release-file: t14-baseline/release-t14-baseline-app.json
+          t14-proof-directory: t14-proofs
+          t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
+          t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
+          t14-proposed-source-sha: ${{ github.sha }}
+
+      - name: Stage T14 builder proofs with the image promotion
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
+        run: |
+          set -euo pipefail
+          test "$(find t14-proofs -maxdepth 1 -name '*.dsse' -type f | wc -l)" -eq 6
+          proof_dir="gitops/$T14_PATH/proofs"
+          install -d -m 0755 "$proof_dir"
+          for proof in t14-proofs/*.dsse; do
+            install -m 0644 "$proof" "$proof_dir/$(basename "$proof")"
+          done
 
       - name: Commit staging promotion
         id: commit
@@ -329,11 +462,16 @@ jobs:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ github.sha }}
           TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
+          T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
         run: |
           set -euo pipefail
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
           git add -- "${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}"
+          if [ "$T14_ENABLED" = true ]; then
+            git add -- "$T14_PATH/images.yaml" "$T14_PATH/proofs"
+          fi
           if git diff --cached --quiet; then
             echo "No staging image change required"
           else
@@ -349,6 +487,31 @@ jobs:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
           ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
           APPLICATION: ${{ needs.prepare.outputs.gitops_staging_application }}
+          REVISION: ${{ steps.commit.outputs.revision }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            status="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+              "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+            health="$(jq -r '.status.health.status // ""' <<<"$status")"
+            sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
+            revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
+            if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Argo CD did not reconcile $APPLICATION to $REVISION in 10 minutes" >&2
+          exit 1
+
+      - name: Wait for Argo CD T14 health
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
           REVISION: ${{ steps.commit.outputs.revision }}
         run: |
           set -euo pipefail

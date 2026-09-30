@@ -25,8 +25,27 @@ class WorkflowContractTests(unittest.TestCase):
     def test_zot_publication_is_never_github_hosted(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         self.assertIn('runner=["arc-k3s"]', release)
+        self.assertIn('runner=["arc-k3s-ninjasre-t14"]', release)
         self.assertIn('runner=["self-hosted","proxmox-lxc","crossbuild"]', release)
         self.assertNotIn("runs-on: ubuntu", release)
+
+    def test_t14_builder_proof_is_bound_to_checkout_lock_and_oci_digest(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertIn("--repository-root .", release)
+        self.assertIn("--lock-file uv.lock", release)
+        self.assertIn("--oci-layout", release)
+        self.assertIn("--image-digest \"$T14_IMAGE_DIGEST\"", release)
+        self.assertIn("test \"${#targets[@]}\" -eq 6", release)
+        self.assertIn('if [ "$target" = baseline ]; then', release)
+        self.assertIn('test "$proposed_count" -eq 5', release)
+        self.assertIn("name: t14-builder-proof-${{ matrix.name }}", release)
+
+    def test_t14_promotion_is_blocked_without_a_separate_baseline_build(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertIn("Block T14 until a separate historical baseline build is available", release)
+        self.assertIn("T14 release is blocked", release)
+        self.assertIn("t14-baseline-release-file", release)
+        self.assertIn("t14-proof-directory", release)
 
     def test_no_workflow_uses_github_hosted_ubuntu(self) -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml"):

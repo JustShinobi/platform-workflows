@@ -32,6 +32,22 @@ outputs:
     value: ${{ steps.validate.outputs.gitops_image_promotion }}
   gitops_promotion_mode:
     value: ${{ steps.validate.outputs.gitops_promotion_mode }}
+  t14_enabled:
+    value: ${{ steps.validate.outputs.t14_enabled }}
+  t14_builder_key_id:
+    value: ${{ steps.validate.outputs.t14_builder_key_id }}
+  t14_builder_targets:
+    value: ${{ steps.validate.outputs.t14_builder_targets }}
+  t14_gitops_path:
+    value: ${{ steps.validate.outputs.t14_gitops_path }}
+  t14_gitops_application:
+    value: ${{ steps.validate.outputs.t14_gitops_application }}
+  t14_image_component:
+    value: ${{ steps.validate.outputs.t14_image_component }}
+  t14_shared_components:
+    value: ${{ steps.validate.outputs.t14_shared_components }}
+  t14_baseline_source_sha:
+    value: ${{ steps.validate.outputs.t14_baseline_source_sha }}
 runs:
   using: composite
   steps:

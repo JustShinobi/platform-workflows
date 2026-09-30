@@ -11,6 +11,38 @@ inputs:
     description: Target file kind (kustomize images.yaml or chart-values)
     required: false
     default: kustomize
+  t14-targets:
+    description: Ordered T14 arm names to update by pod-template label
+    required: false
+    default: ''
+  t14-component:
+    description: Component/container name shared by the T14 arm Deployments
+    required: false
+    default: app
+  t14-shared-components:
+    description: Shared T14 component/container names updated from release fragments
+    required: false
+    default: ''
+  t14-baseline-release-file:
+    description: Separate historical baseline release fragment for the baseline arm
+    required: false
+    default: ''
+  t14-proof-directory:
+    description: Directory containing the six T14 builder proofs
+    required: false
+    default: ''
+  t14-builder-key-id:
+    description: Descriptor-pinned T14 builder key id
+    required: false
+    default: ''
+  t14-baseline-source-sha:
+    description: Historical source SHA bound to the baseline proof
+    required: false
+    default: ''
+  t14-proposed-source-sha:
+    description: Current source SHA bound to proposal proofs
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -26,4 +58,47 @@ runs:
       env:
         IMAGES_FILE: ${{ inputs.images-file }}
         RELEASE_DIRECTORY: ${{ inputs.release-directory }}
-      run: python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
+        T14_TARGETS: ${{ inputs.t14-targets }}
+        T14_COMPONENT: ${{ inputs.t14-component }}
+        T14_SHARED_COMPONENTS: ${{ inputs.t14-shared-components }}
+        T14_BASELINE_RELEASE_FILE: ${{ inputs.t14-baseline-release-file }}
+        T14_PROOF_DIRECTORY: ${{ inputs.t14-proof-directory }}
+        T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
+        T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
+        T14_PROPOSED_SOURCE_SHA: ${{ inputs.t14-proposed-source-sha }}
+      run: |
+        set -euo pipefail
+        if [ -n "$T14_TARGETS" ]; then
+          # The descriptor validates this list before the reusable workflow
+          # starts; passing it as separate argv values keeps target names out
+          # of shell interpolation.
+          targets_text="${T14_TARGETS//,/ }"
+          read -r -a targets <<< "$targets_text"
+          shared_text="${T14_SHARED_COMPONENTS//,/ }"
+          read -r -a shared_components <<< "$shared_text"
+          command=(python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
+            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --t14-targets "${targets[@]}" \
+            --t14-component "$T14_COMPONENT")
+          if [ -n "$T14_SHARED_COMPONENTS" ]; then
+            command+=(--t14-shared-components "${shared_components[@]}")
+          fi
+          if [ -n "$T14_BASELINE_RELEASE_FILE" ]; then
+            command+=(--t14-baseline-release-file "$T14_BASELINE_RELEASE_FILE")
+          fi
+          "${command[@]}"
+          if [ -n "$T14_PROOF_DIRECTORY" ]; then
+            test -n "$T14_BUILDER_KEY_ID"
+            test -n "$T14_BASELINE_SOURCE_SHA"
+            test -n "$T14_PROPOSED_SOURCE_SHA"
+            python3 "${{ github.action_path }}/../../../scripts/validate_t14_promotion.py" \
+              --proof-directory "$T14_PROOF_DIRECTORY" \
+              --baseline-release-file "$T14_BASELINE_RELEASE_FILE" \
+              --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
+              --baseline-source-sha "$T14_BASELINE_SOURCE_SHA" \
+              --proposed-source-sha "$T14_PROPOSED_SOURCE_SHA" \
+              --builder-key-id "$T14_BUILDER_KEY_ID"
+          fi
+        else
+          python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
+            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
+        fi

@@ -111,6 +111,85 @@ class DescriptorTests(unittest.TestCase):
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
             self.assertEqual(len(data["components"]), 2)
 
+    def test_accepts_the_closed_t14_builder_contract(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"].append({
+            **value["components"][0], "name": "proxy", "workload": "example-proxy",
+            "container": "proxy",
+        })
+        value["t14"] = {
+            "enabled": True,
+            "builderKeyId": "t14-builder-2026-09",
+            "builderTargets": [
+                "baseline",
+                "proposed",
+                "proposed-without-relations",
+                "proposed-without-t06_readers",
+                "proposed-without-t07_probes",
+                "proposed-without-t09_planning",
+            ],
+            "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
+            "gitopsApplication": "stg-ninjasre-t14",
+            "imageComponent": "api",
+            "sharedComponents": ["proxy"],
+            "baselineSourceSha": "a" * 40,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertEqual(data["t14"]["imageComponent"], "api")
+
+    def test_rejects_an_incomplete_t14_target_set(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"].append({
+            **value["components"][0], "name": "proxy", "workload": "example-proxy",
+            "container": "proxy",
+        })
+        value["t14"] = {
+            "enabled": True,
+            "builderKeyId": "t14-builder-2026-09",
+            "builderTargets": ["baseline"],
+            "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
+            "gitopsApplication": "stg-ninjasre-t14",
+            "imageComponent": "api",
+            "sharedComponents": ["proxy"],
+            "baselineSourceSha": "a" * 40,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "six approved targets"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
+    def test_accepts_a_blocked_t14_until_historical_baseline_is_attested(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["t14"] = {
+            "enabled": False,
+            "blockReason": "historical-baseline-not-attested",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertFalse(data["t14"]["enabled"])
+
+    def test_rejects_an_enabled_t14_without_a_historical_baseline_sha(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["t14"] = {
+            "enabled": True,
+            "builderKeyId": "t14-builder-2026-09",
+            "builderTargets": [
+                "baseline",
+                "proposed",
+                "proposed-without-relations",
+                "proposed-without-t06_readers",
+                "proposed-without-t07_probes",
+                "proposed-without-t09_planning",
+            ],
+            "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
+            "gitopsApplication": "stg-ninjasre-t14",
+            "imageComponent": "api",
+            "sharedComponents": ["proxy"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "missing keys.*baselineSourceSha"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
 
 if __name__ == "__main__":
     unittest.main()
