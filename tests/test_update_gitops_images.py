@@ -1,12 +1,13 @@
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 import yaml
 
 from scripts.update_gitops_images import (
     load_release,
+    load_release_records,
     update,
     update_chart_values,
     update_t14,
@@ -14,6 +15,18 @@ from scripts.update_gitops_images import (
 
 
 class GitOpsImageTests(unittest.TestCase):
+    @staticmethod
+    def _fragment(
+        component: str, image: str, digest_char: str, workload: str, container: str
+    ) -> dict[str, str]:
+        return {
+            "component": component,
+            "image": image,
+            "digest": "sha256:" + digest_char * 64,
+            "workload": workload,
+            "container": container,
+        }
+
     def test_updates_exact_workload_and_container(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -21,16 +34,27 @@ class GitOpsImageTests(unittest.TestCase):
             images.write_text(
                 "kind: Deployment\nmetadata:\n  name: app-api\nspec:\n  template:\n    spec:\n"
                 "      containers:\n        - name: api\n          image: old@sha256:"
-                + "0" * 64 + "\n",
+                + "0" * 64
+                + "\n",
                 encoding="utf-8",
             )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "sbom-api.spdx.json").write_text(json.dumps({"spdxVersion": "SPDX-2.3"}), encoding="utf-8")
-            (release_dir / "api.json").write_text(json.dumps({
-                "component": "api", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app-api", "container": "api"
-            }), encoding="utf-8")
+            (release_dir / "sbom-api.spdx.json").write_text(
+                json.dumps({"spdxVersion": "SPDX-2.3"}), encoding="utf-8"
+            )
+            (release_dir / "api.json").write_text(
+                json.dumps(
+                    {
+                        "component": "api",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app-api",
+                        "container": "api",
+                    }
+                ),
+                encoding="utf-8",
+            )
             update(images, load_release(release_dir))
             data = yaml.safe_load(images.read_text(encoding="utf-8"))
             self.assertEqual(
@@ -50,10 +74,18 @@ class GitOpsImageTests(unittest.TestCase):
             )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "api.json").write_text(json.dumps({
-                "component": "api", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app-api", "container": "api"
-            }), encoding="utf-8")
+            (release_dir / "api.json").write_text(
+                json.dumps(
+                    {
+                        "component": "api",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app-api",
+                        "container": "api",
+                    }
+                ),
+                encoding="utf-8",
+            )
             update_chart_values(values, load_release(release_dir))
             data = yaml.safe_load(values.read_text(encoding="utf-8"))
             self.assertEqual(data["api"]["image"]["repository"], "registry.lan/app")
@@ -67,10 +99,18 @@ class GitOpsImageTests(unittest.TestCase):
             values.write_text("api:\n  fullnameOverride: other\n", encoding="utf-8")
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "api.json").write_text(json.dumps({
-                "component": "api", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app-api", "container": "api"
-            }), encoding="utf-8")
+            (release_dir / "api.json").write_text(
+                json.dumps(
+                    {
+                        "component": "api",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app-api",
+                        "container": "api",
+                    }
+                ),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(ValueError, "missing release targets"):
                 update_chart_values(values, load_release(release_dir))
 
@@ -78,13 +118,23 @@ class GitOpsImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             images = root / "images.yaml"
-            images.write_text("kind: Deployment\nmetadata:\n  name: other\n", encoding="utf-8")
+            images.write_text(
+                "kind: Deployment\nmetadata:\n  name: other\n", encoding="utf-8"
+            )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "api.json").write_text(json.dumps({
-                "component": "api", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app-api", "container": "api"
-            }), encoding="utf-8")
+            (release_dir / "api.json").write_text(
+                json.dumps(
+                    {
+                        "component": "api",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app-api",
+                        "container": "api",
+                    }
+                ),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(ValueError, "missing release targets"):
                 update(images, load_release(release_dir))
 
@@ -95,21 +145,48 @@ class GitOpsImageTests(unittest.TestCase):
             documents = []
             targets = ["baseline", "proposed"]
             for target in targets:
-                documents.append({
-                    "kind": "Deployment",
-                    "metadata": {"name": f"t14-{target}"},
-                    "spec": {"template": {"metadata": {"labels": {"ninjasre.io/t14-arm": target}},
-                        "spec": {"containers": [{"name": "app", "image": "old"}]}}},
-                })
-            images.write_text("---\n".join(yaml.safe_dump(item, sort_keys=False) for item in documents), encoding="utf-8")
+                documents.append(
+                    {
+                        "kind": "Deployment",
+                        "metadata": {"name": f"t14-{target}"},
+                        "spec": {
+                            "template": {
+                                "metadata": {"labels": {"ninjasre.io/t14-arm": target}},
+                                "spec": {
+                                    "containers": [{"name": "app", "image": "old"}]
+                                },
+                            }
+                        },
+                    }
+                )
+            images.write_text(
+                "---\n".join(
+                    yaml.safe_dump(item, sort_keys=False) for item in documents
+                ),
+                encoding="utf-8",
+            )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "app.json").write_text(json.dumps({
-                "component": "app", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app", "container": "app"
-            }), encoding="utf-8")
+            (release_dir / "app.json").write_text(
+                json.dumps(
+                    {
+                        "component": "app",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app",
+                        "container": "app",
+                    }
+                ),
+                encoding="utf-8",
+            )
             baseline = {("app", "app"): "registry.lan/baseline@sha256:" + "b" * 64}
-            update_t14(images, load_release(release_dir), targets, "app", baseline_release=baseline)
+            update_t14(
+                images,
+                load_release(release_dir),
+                targets,
+                "app",
+                baseline_release=baseline,
+            )
             rendered = list(yaml.safe_load_all(images.read_text(encoding="utf-8")))
             self.assertEqual(
                 rendered[0]["spec"]["template"]["spec"]["containers"][0]["image"],
@@ -117,6 +194,161 @@ class GitOpsImageTests(unittest.TestCase):
             )
             self.assertEqual(
                 rendered[1]["spec"]["template"]["spec"]["containers"][0]["image"],
+                "registry.lan/app@sha256:" + "a" * 64,
+            )
+
+    def test_t14_updates_all_ten_image_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images.yaml"
+            targets = [
+                "baseline",
+                "proposed",
+                "proposed-without-relations",
+                "proposed-without-t06_readers",
+                "proposed-without-t07_probes",
+                "proposed-without-t09_planning",
+            ]
+            documents: list[dict[str, object]] = []
+            for target in targets:
+                documents.append(
+                    {
+                        "kind": "Deployment",
+                        "metadata": {"name": f"t14-{target}"},
+                        "spec": {
+                            "template": {
+                                "metadata": {"labels": {"ninjasre.io/t14-arm": target}},
+                                "spec": {
+                                    "containers": [{"name": "app", "image": "old"}],
+                                },
+                            },
+                        },
+                    }
+                )
+            documents.extend(
+                [
+                    {
+                        "kind": "Deployment",
+                        "metadata": {"name": "t14-proxy"},
+                        "spec": {
+                            "template": {
+                                "metadata": {
+                                    "labels": {"ninjasre.io/t14-role": "shared"}
+                                },
+                                "spec": {
+                                    "containers": [{"name": "proxy", "image": "old"}],
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "kind": "Job",
+                        "metadata": {"name": "t14-observer"},
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [
+                                        {"name": "observer", "image": "old"}
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "kind": "Job",
+                        "metadata": {"name": "t14-judge-auditor"},
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "initContainers": [
+                                        {"name": "stage-t14-judge-key", "image": "old"}
+                                    ],
+                                    "containers": [{"name": "auditor", "image": "old"}],
+                                },
+                            },
+                        },
+                    },
+                ]
+            )
+            images.write_text(
+                "---\n".join(
+                    yaml.safe_dump(item, sort_keys=False) for item in documents
+                ),
+                encoding="utf-8",
+            )
+            release_dir = root / "release"
+            release_dir.mkdir()
+            for fragment in (
+                self._fragment("app", "registry.lan/app", "a", "app", "app"),
+                self._fragment("proxy", "registry.lan/proxy", "c", "proxy", "proxy"),
+                self._fragment(
+                    "t14-observer",
+                    "registry.lan/t14-observer",
+                    "d",
+                    "t14-observer",
+                    "observer",
+                ),
+            ):
+                (release_dir / f"{fragment['component']}.json").write_text(
+                    json.dumps(fragment), encoding="utf-8"
+                )
+            baseline = {("app", "app"): "registry.lan/app@sha256:" + "b" * 64}
+            records = load_release_records(release_dir)
+            update_t14(
+                images,
+                load_release(release_dir),
+                targets,
+                "app",
+                shared_components=["proxy", "t14-observer"],
+                baseline_release=baseline,
+                release_records=records,
+            )
+            rendered = list(yaml.safe_load_all(images.read_text(encoding="utf-8")))
+            image_refs = [
+                container["image"]
+                for document in rendered
+                for container in [
+                    *document.get("spec", {})
+                    .get("template", {})
+                    .get("spec", {})
+                    .get("initContainers", []),
+                    *document.get("spec", {})
+                    .get("template", {})
+                    .get("spec", {})
+                    .get("containers", []),
+                ]
+                if isinstance(container, dict) and "image" in container
+            ]
+            self.assertEqual(len(image_refs), 10)
+            self.assertEqual(image_refs.count("registry.lan/app@sha256:" + "b" * 64), 1)
+            self.assertEqual(image_refs.count("registry.lan/app@sha256:" + "a" * 64), 7)
+            self.assertEqual(
+                image_refs.count("registry.lan/proxy@sha256:" + "c" * 64), 1
+            )
+            self.assertEqual(
+                image_refs.count("registry.lan/t14-observer@sha256:" + "d" * 64), 1
+            )
+
+    def test_common_update_can_allow_t14_only_component_to_be_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images.yaml"
+            images.write_text(
+                "kind: Deployment\nmetadata:\n  name: app\nspec:\n  template:\n    spec:\n"
+                "      containers:\n      - name: app\n        image: old\n",
+                encoding="utf-8",
+            )
+            release = {
+                ("app", "app"): "registry.lan/app@sha256:" + "a" * 64,
+                ("t14-observer", "observer"): "registry.lan/t14-observer@sha256:"
+                + "b" * 64,
+            }
+            update(
+                images, release, allow_missing_targets={("t14-observer", "observer")}
+            )
+            data = yaml.safe_load(images.read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["spec"]["template"]["spec"]["containers"][0]["image"],
                 "registry.lan/app@sha256:" + "a" * 64,
             )
 
@@ -132,10 +364,18 @@ class GitOpsImageTests(unittest.TestCase):
             )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "app.json").write_text(json.dumps({
-                "component": "app", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app", "container": "app"
-            }), encoding="utf-8")
+            (release_dir / "app.json").write_text(
+                json.dumps(
+                    {
+                        "component": "app",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app",
+                        "container": "app",
+                    }
+                ),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(ValueError, "separate baseline release"):
                 update_t14(images, load_release(release_dir), ["baseline"], "app")
 
@@ -151,17 +391,27 @@ class GitOpsImageTests(unittest.TestCase):
             )
             release_dir = root / "release"
             release_dir.mkdir()
-            (release_dir / "app.json").write_text(json.dumps({
-                "component": "app", "image": "registry.lan/app", "digest": "sha256:" + "a" * 64,
-                "workload": "app", "container": "app"
-            }), encoding="utf-8")
+            (release_dir / "app.json").write_text(
+                json.dumps(
+                    {
+                        "component": "app",
+                        "image": "registry.lan/app",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "app",
+                        "container": "app",
+                    }
+                ),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(ValueError, "missing T14 targets"):
                 update_t14(
                     images,
                     load_release(release_dir),
                     ["baseline", "proposed"],
                     "app",
-                    baseline_release={("app", "app"): "registry.lan/baseline@sha256:" + "b" * 64},
+                    baseline_release={
+                        ("app", "app"): "registry.lan/baseline@sha256:" + "b" * 64
+                    },
                 )
 
 

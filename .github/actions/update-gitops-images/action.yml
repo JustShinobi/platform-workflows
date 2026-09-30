@@ -27,6 +27,10 @@ inputs:
     description: Separate historical baseline release fragment for the baseline arm
     required: false
     default: ''
+  allow-missing-components:
+    description: T14-only components allowed to be absent from the common environment file
+    required: false
+    default: ''
   t14-proof-directory:
     description: Directory containing the six T14 builder proofs
     required: false
@@ -176,6 +180,7 @@ runs:
         T14_COMPONENT: ${{ inputs.t14-component }}
         T14_SHARED_COMPONENTS: ${{ inputs.t14-shared-components }}
         T14_BASELINE_RELEASE_FILE: ${{ inputs.t14-baseline-release-file }}
+        ALLOW_MISSING_COMPONENTS: ${{ inputs.allow-missing-components }}
         T14_PROOF_DIRECTORY: ${{ inputs.t14-proof-directory }}
         T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
         T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
@@ -219,6 +224,12 @@ runs:
             --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE"
           "${command[@]}"
         else
-          python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
-            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}"
+          missing_text="${ALLOW_MISSING_COMPONENTS//,/ }"
+          read -r -a missing_components <<< "$missing_text"
+          command=(python3 "${{ github.action_path }}/../../../scripts/update_gitops_images.py" \
+            "$IMAGES_FILE" "$RELEASE_DIRECTORY" --mode "${{ inputs.mode }}")
+          if [ -n "$ALLOW_MISSING_COMPONENTS" ]; then
+            command+=(--allow-missing-components "${missing_components[@]}")
+          fi
+          "${command[@]}"
         fi
