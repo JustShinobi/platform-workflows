@@ -407,8 +407,8 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           repository: ${{ needs.prepare.outputs.gitops_repository }}
-          # Descriptor validation binds stagingBranch to the trunk branch used by Argo.
-          ref: ${{ needs.prepare.outputs.gitops_staging_branch }}
+          # Enabled T14 binds stagingBranch to the trunk; other releases retain baseBranch.
+          ref: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
           token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
           path: gitops
 
@@ -487,7 +487,7 @@ jobs:
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ github.sha }}
-          TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_staging_branch }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
           T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
           T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
         run: |
@@ -541,7 +541,6 @@ jobs:
               ;;
             *)
               echo "Could not determine whether T14 Application $APPLICATION is active (Argo CD returned HTTP $http_code)." >&2
-              cat "$response_file" >&2
               exit 1
               ;;
           esac

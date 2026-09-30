@@ -67,6 +67,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("*)", activation)
         self.assertIn("Could not determine whether T14 Application", activation)
         self.assertIn("exit 1", activation)
+        self.assertNotIn('cat "$response_file"', activation)
 
     def test_t14_active_application_keeps_both_health_and_promotion_gates(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
@@ -94,14 +95,26 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("test -d \"$T14_PROOF_DIRECTORY\"", action)
         self.assertIn("test -s \"$T14_BASELINE_RELEASE_FILE\"", action)
 
-    def test_staging_publication_uses_the_descriptor_staging_branch(self) -> None:
+    def test_non_t14_staging_publication_keeps_the_base_branch(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
-        self.assertIn("ref: ${{ needs.prepare.outputs.gitops_staging_branch }}", staging)
-        self.assertIn(
+        self.assertIn("|| needs.prepare.outputs.gitops_base_branch }}", staging)
+        self.assertNotIn("ref: ${{ needs.prepare.outputs.gitops_staging_branch }}", staging)
+        self.assertNotIn(
             "TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_staging_branch }}",
             staging,
         )
+
+    def test_t14_staging_publication_selects_its_validated_branch(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
+        branch = (
+            "needs.prepare.outputs.t14_enabled == 'true' && "
+            "needs.prepare.outputs.gitops_staging_branch || "
+            "needs.prepare.outputs.gitops_base_branch"
+        )
+        self.assertIn(f"ref: ${{{{ {branch} }}}}", staging)
+        self.assertIn(f"TARGET_BRANCH: ${{{{ {branch} }}}}", staging)
 
     def test_t14_baseline_fetch_binds_artifact_to_run_and_source_sha(self) -> None:
         action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(encoding="utf-8")

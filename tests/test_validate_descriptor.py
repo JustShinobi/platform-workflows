@@ -17,11 +17,33 @@ VALID = {
     }],
     "gitops": {
         "repository": "JustShinobi/k3s-gitops-prod", "baseBranch": "main",
-        "stagingBranch": "main", "productionBranch": "main",
+        "stagingBranch": "deploy/stg", "productionBranch": "main",
         "stagingPath": "applications/example/overlays/stg",
         "productionPath": "applications/example/overlays/prod",
         "stagingApplication": "stg-example", "productionApplication": "prd-example"
     },
+}
+
+
+T14_CONTRACT = {
+    "enabled": True,
+    "builderKeyId": "t14-builder-2026-09",
+    "builderTargets": [
+        "baseline",
+        "proposed",
+        "proposed-without-relations",
+        "proposed-without-t06_readers",
+        "proposed-without-t07_probes",
+        "proposed-without-t09_planning",
+    ],
+    "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
+    "gitopsApplication": "stg-ninjasre-t14",
+    "imageComponent": "api",
+    "sharedComponents": ["proxy"],
+    "baselineSourceSha": "a" * 40,
+    "baselineRepository": "JustShinobi/ninjasre-t14-baseline",
+    "baselineRunId": "123456789",
+    "baselineArtifactName": "t14-baseline-release",
 }
 
 
@@ -73,12 +95,11 @@ class DescriptorTests(unittest.TestCase):
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
             self.assertEqual(data["gitops"]["imagePromotion"], "chart-values")
 
-    def test_rejects_a_staging_branch_that_does_not_match_the_trunk(self) -> None:
+    def test_allows_a_non_t14_staging_branch_that_does_not_match_the_trunk(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
-        value["gitops"]["stagingBranch"] = "deploy/stg"
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(InvalidDescriptor, "stagingBranch.*baseBranch"):
-                load_and_validate(self.write(Path(directory), value), check_files=False)
+            data = load_and_validate(self.write(Path(directory), value), check_files=False)
+            self.assertEqual(data["gitops"]["stagingBranch"], "deploy/stg")
 
     def test_accepts_production_only_promotion(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
@@ -124,29 +145,22 @@ class DescriptorTests(unittest.TestCase):
             **value["components"][0], "name": "proxy", "workload": "example-proxy",
             "container": "proxy",
         })
-        value["t14"] = {
-            "enabled": True,
-            "builderKeyId": "t14-builder-2026-09",
-            "builderTargets": [
-                "baseline",
-                "proposed",
-                "proposed-without-relations",
-                "proposed-without-t06_readers",
-                "proposed-without-t07_probes",
-                "proposed-without-t09_planning",
-            ],
-            "gitopsPath": "clusters/prod/workloads/ninjasre-t14",
-            "gitopsApplication": "stg-ninjasre-t14",
-            "imageComponent": "api",
-            "sharedComponents": ["proxy"],
-            "baselineSourceSha": "a" * 40,
-            "baselineRepository": "JustShinobi/ninjasre-t14-baseline",
-            "baselineRunId": "123456789",
-            "baselineArtifactName": "t14-baseline-release",
-        }
+        value["gitops"]["stagingBranch"] = "main"
+        value["t14"] = yaml.safe_load(yaml.safe_dump(T14_CONTRACT))
         with tempfile.TemporaryDirectory() as directory:
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
             self.assertEqual(data["t14"]["imageComponent"], "api")
+
+    def test_rejects_an_enabled_t14_staging_branch_that_does_not_match_the_trunk(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["components"].append({
+            **value["components"][0], "name": "proxy", "workload": "example-proxy",
+            "container": "proxy",
+        })
+        value["t14"] = yaml.safe_load(yaml.safe_dump(T14_CONTRACT))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "stagingBranch.*baseBranch"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
 
     def test_rejects_an_incomplete_t14_target_set(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))

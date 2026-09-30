@@ -26,7 +26,7 @@ flowchart TD
     end
 
     subgraph StagingStage ["🧪 2. Staging Automático"]
-        Zot --> AutoStg["📝 Atualiza Staging no GitOps (k3s-gitops-prod)<br/>Branch main (trunk-based)"]
+        Zot --> AutoStg["📝 Atualiza Staging no GitOps (k3s-gitops-prod)<br/>Canal deploy/stg (Fast-Forward)"]
         AutoStg --> ArgoStg["🔄 Argo CD reconcilia e aguarda Synced/Healthy"]
         ArgoStg --> Smoke["🧪 Executa scripts/ci/smoke-stg no endpoint Staging"]
     end
@@ -35,7 +35,7 @@ flowchart TD
         Smoke --> ProdPR["📋 Abre automaticamente PR de Produção no GitOps<br/>(com os mesmos digests imutáveis)"]
         ProdPR --> HumanReview["👀 Revisão Humana e Aprovação de PR"]
         HumanReview --> ProdMerge["✅ Merge do PR de Produção"]
-        ProdMerge --> ArgoProd["☸️ Argo CD reconcilia em k3s-prod<br/>Branch main (trunk-based)"]
+        ProdMerge --> ArgoProd["☸️ Argo CD reconcilia em k3s-prod<br/>Canal deploy/prod (Fast-Forward)"]
     end
 ```
 
@@ -69,8 +69,8 @@ gitops:
   owner: JustShinobi
   repository: k3s-gitops-prod
   baseBranch: main
-  stagingBranch: main
-  productionBranch: main
+  stagingBranch: deploy/stg
+  productionBranch: deploy/prod
   imagePromotion: chart-values # ou kustomize-patch
   stagingPath: clusters/prod/workloads/minha-app
   productionPath: clusters/prod/workloads/minha-app

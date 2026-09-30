@@ -168,10 +168,6 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
     if promotion_mode == "staging-and-production":
         for key in ("stagingBranch",):
             _string(gitops[key], f"gitops.{key}", REF)
-        if gitops["stagingBranch"] != gitops["baseBranch"]:
-            raise InvalidDescriptor(
-                "gitops.stagingBranch must match gitops.baseBranch for trunk-based GitOps"
-            )
         for key in ("stagingPath",):
             _relative_path(gitops[key], f"gitops.{key}")
         for key in ("stagingApplication",):
@@ -217,6 +213,10 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
         _string(t14["baselineRepository"], "t14.baselineRepository", REPOSITORY)
         _string(t14["baselineRunId"], "t14.baselineRunId", RUN_ID)
         _string(t14["baselineArtifactName"], "t14.baselineArtifactName", ARTIFACT_NAME)
+        if gitops["stagingBranch"] != gitops["baseBranch"]:
+            raise InvalidDescriptor(
+                "gitops.stagingBranch must match gitops.baseBranch for enabled T14"
+            )
     return data
 
 
