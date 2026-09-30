@@ -33,6 +33,7 @@ MAX_OCI_JSON_BYTES = 4 * 1024 * 1024
 RECEIPT_KEYS = {
     "schema_version",
     "target_name",
+    "workflow_revision",
     "application_revision",
     "image_digest",
     "builder_proof_sha256",
@@ -48,6 +49,7 @@ PROOF_NAME = "release-t14-baseline.builder.dsse"
 class BaselineReceipt:
     """Validated public identity and hashes from a baseline artifact receipt."""
 
+    workflow_revision: str
     application_revision: str
     image_digest: str
     builder_proof_sha256: str
@@ -201,14 +203,19 @@ def _verify_oci_layout(archive_root: Path, expected_digest: str) -> None:
         _blob(archive_root, layer_digest, layer_size, f"OCI image layer {index}")
 
 
-def _receipt(path: Path, expected_source_sha: str) -> BaselineReceipt:
+def _receipt(path: Path, expected_source_sha: str, expected_workflow_sha: str) -> BaselineReceipt:
     data = _json_file(path, "baseline receipt")
     if set(data) != RECEIPT_KEYS:
         raise ValueError("baseline receipt has an unexpected schema")
-    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+    if type(data["schema_version"]) is not int or data["schema_version"] != 2:
         raise ValueError("baseline receipt schema version is invalid")
     if data["target_name"] != "baseline":
         raise ValueError("baseline receipt target is invalid")
+    workflow_sha = data["workflow_revision"]
+    if not isinstance(workflow_sha, str) or GIT_SHA.fullmatch(workflow_sha) is None:
+        raise ValueError("baseline receipt workflow revision is invalid")
+    if workflow_sha != expected_workflow_sha:
+        raise ValueError("baseline receipt does not match the producing workflow revision")
     source_sha = data["application_revision"]
     if not isinstance(source_sha, str) or GIT_SHA.fullmatch(source_sha) is None:
         raise ValueError("baseline receipt application revision is invalid")
@@ -221,6 +228,7 @@ def _receipt(path: Path, expected_source_sha: str) -> BaselineReceipt:
             raise ValueError(f"baseline receipt {key} is invalid")
         values[key] = value
     return BaselineReceipt(
+        workflow_sha,
         source_sha,
         values["image_digest"],
         values["builder_proof_sha256"],
@@ -249,6 +257,7 @@ def validate(
     artifact_directory: Path,
     proposed_release_file: Path,
     expected_source_sha: str,
+    expected_workflow_sha: str,
     builder_key_id: str,
     builder_public_key_file: Path,
     output_release_file: Path,
@@ -256,10 +265,12 @@ def validate(
     """Validate the historical artifact and write a registry-ready baseline fragment."""
     if GIT_SHA.fullmatch(expected_source_sha) is None:
         raise ValueError("baseline source revision must be a full Git SHA")
+    if GIT_SHA.fullmatch(expected_workflow_sha) is None:
+        raise ValueError("baseline workflow revision must be a full Git SHA")
     archive = _artifact_file(artifact_directory, ARCHIVE_NAME, "OCI archive")
     receipt_file = _artifact_file(artifact_directory, RECEIPT_NAME, "receipt")
     proof = _artifact_file(artifact_directory, PROOF_NAME, "builder proof")
-    receipt = _receipt(receipt_file, expected_source_sha)
+    receipt = _receipt(receipt_file, expected_source_sha, expected_workflow_sha)
     if _sha256_file(archive, "OCI archive", MAX_ARCHIVE_BYTES) != receipt.oci_archive_sha256:
         raise ValueError("OCI archive digest does not match the baseline receipt")
     if _sha256_file(proof, "builder proof", MAX_OCI_JSON_BYTES) != receipt.builder_proof_sha256:
@@ -295,6 +306,7 @@ def main() -> int:
     parser.add_argument("--artifact-directory", type=Path, required=True)
     parser.add_argument("--proposed-release-file", type=Path, required=True)
     parser.add_argument("--expected-source-sha", required=True)
+    parser.add_argument("--expected-workflow-sha", required=True)
     parser.add_argument("--builder-key-id", required=True)
     parser.add_argument("--builder-public-key-file", type=Path, required=True)
     parser.add_argument("--output-release-file", type=Path, required=True)
@@ -304,6 +316,7 @@ def main() -> int:
             args.artifact_directory,
             args.proposed_release_file,
             args.expected_source_sha,
+            args.expected_workflow_sha,
             args.builder_key_id,
             args.builder_public_key_file,
             args.output_release_file,

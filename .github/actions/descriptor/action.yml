@@ -48,6 +48,8 @@ outputs:
     value: ${{ steps.validate.outputs.t14_shared_components }}
   t14_baseline_source_sha:
     value: ${{ steps.validate.outputs.t14_baseline_source_sha }}
+  t14_baseline_workflow_sha:
+    value: ${{ steps.validate.outputs.t14_baseline_workflow_sha }}
   t14_baseline_repository:
     value: ${{ steps.validate.outputs.t14_baseline_repository }}
   t14_baseline_run_id:

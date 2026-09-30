@@ -60,6 +60,7 @@ jobs:
       t14_image_component: ${{ steps.descriptor.outputs.t14_image_component }}
       t14_shared_components: ${{ steps.descriptor.outputs.t14_shared_components }}
       t14_baseline_source_sha: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+      t14_baseline_workflow_sha: ${{ steps.descriptor.outputs.t14_baseline_workflow_sha }}
       t14_baseline_repository: ${{ steps.descriptor.outputs.t14_baseline_repository }}
       t14_baseline_run_id: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
       t14_baseline_artifact_name: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
@@ -93,6 +94,7 @@ jobs:
         shell: bash
         env:
           BASELINE_SOURCE_SHA: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+          BASELINE_WORKFLOW_SHA: ${{ steps.descriptor.outputs.t14_baseline_workflow_sha }}
           BASELINE_REPOSITORY: ${{ steps.descriptor.outputs.t14_baseline_repository }}
           BASELINE_RUN_ID: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
           BASELINE_ARTIFACT_NAME: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
@@ -100,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$BASELINE_SOURCE_SHA"
+          test -n "$BASELINE_WORKFLOW_SHA"
           test -n "$BASELINE_REPOSITORY"
           test -n "$BASELINE_RUN_ID"
           test -n "$BASELINE_ARTIFACT_NAME"
@@ -461,6 +464,7 @@ jobs:
           t14-proof-directory: t14-proofs
           t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
           t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
+          t14-baseline-workflow-sha: ${{ needs.prepare.outputs.t14_baseline_workflow_sha }}
           t14-proposed-source-sha: ${{ github.sha }}
           t14-builder-public-key-file: /run/secrets/t14/builder-key/public-key
           t14-baseline-repository: ${{ needs.prepare.outputs.t14_baseline_repository }}
