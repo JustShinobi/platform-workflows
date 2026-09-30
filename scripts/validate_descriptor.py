@@ -29,7 +29,7 @@ ROOT_KEYS = {"schemaVersion", "application", "components", "gitops", "t14"}
 ROOT_REQUIRED_KEYS = ROOT_KEYS - {"t14"}
 COMPONENT_KEYS = {
     "name", "image", "context", "dockerfile", "workload", "container", "target",
-    "platforms", "rolloutProfile"
+    "platforms", "rolloutProfile", "t14Only"
 }
 GITOPS_COMMON_KEYS = {
     "repository", "baseBranch", "productionBranch", "productionPath", "productionApplication"
@@ -139,6 +139,8 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
         _relative_path(component["dockerfile"], f"{label}.dockerfile", must_exist=check_files)
         if "target" in component:
             _string(component["target"], f"{label}.target", TARGET)
+        if "t14Only" in component and type(component["t14Only"]) is not bool:
+            raise InvalidDescriptor(f"{label}.t14Only must be a boolean")
         platforms = component.get("platforms", ["linux/amd64"])
         if not isinstance(platforms, list) or not platforms or len(platforms) != len(set(platforms)):
             raise InvalidDescriptor(f"{label}.platforms must be a non-empty unique list")
@@ -233,6 +235,7 @@ def matrix(data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
             "target": item.get("target", ""),
             "platforms": ",".join(item.get("platforms", ["linux/amd64"])),
             "rollout_profile": item["rolloutProfile"],
+            "t14_only": item.get("t14Only", False),
         })
     return {"include": include}
 
@@ -275,6 +278,9 @@ def main() -> int:
             "t14_baseline_repository": data.get("t14", {}).get("baselineRepository", ""),
             "t14_baseline_run_id": data.get("t14", {}).get("baselineRunId", ""),
             "t14_baseline_artifact_name": data.get("t14", {}).get("baselineArtifactName", ""),
+            "t14_only_components": ",".join(
+                component["name"] for component in data["components"] if component.get("t14Only", False)
+            ),
         }
         with args.github_output.open("a", encoding="utf-8") as output:
             for key, value in values.items():

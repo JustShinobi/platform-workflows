@@ -30,7 +30,8 @@
             "uniqueItems": true,
             "items": {"enum": ["linux/amd64", "linux/arm64"]}
           },
-          "rolloutProfile": {"enum": ["deployment", "bluegreen", "canary"]}
+          "rolloutProfile": {"enum": ["deployment", "bluegreen", "canary"]},
+          "t14Only": {"type": "boolean"}
         }
       }
     },

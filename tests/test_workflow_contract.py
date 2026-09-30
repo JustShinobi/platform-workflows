@@ -105,6 +105,16 @@ class WorkflowContractTests(unittest.TestCase):
             staging,
         )
 
+    def test_t14_only_release_components_can_be_absent_from_common_staging(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
+        self.assertIn("t14_only_components", release)
+        self.assertIn(
+            "needs.prepare.outputs.t14_shared_components || "
+            "needs.prepare.outputs.t14_only_components || ''",
+            staging,
+        )
+
     def test_t14_staging_publication_selects_its_validated_branch(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
