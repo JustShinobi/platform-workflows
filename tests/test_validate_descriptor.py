@@ -17,7 +17,7 @@ VALID = {
     }],
     "gitops": {
         "repository": "JustShinobi/k3s-gitops-prod", "baseBranch": "main",
-        "stagingBranch": "deploy/stg", "productionBranch": "main",
+        "stagingBranch": "main", "productionBranch": "main",
         "stagingPath": "applications/example/overlays/stg",
         "productionPath": "applications/example/overlays/prod",
         "stagingApplication": "stg-example", "productionApplication": "prd-example"
@@ -72,6 +72,13 @@ class DescriptorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data = load_and_validate(self.write(Path(directory), value), check_files=False)
             self.assertEqual(data["gitops"]["imagePromotion"], "chart-values")
+
+    def test_rejects_a_staging_branch_that_does_not_match_the_trunk(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"]["stagingBranch"] = "deploy/stg"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "stagingBranch.*baseBranch"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
 
     def test_accepts_production_only_promotion(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))

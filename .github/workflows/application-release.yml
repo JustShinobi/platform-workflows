@@ -399,12 +399,16 @@ jobs:
     needs: [prepare, build]
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 20
+    outputs:
+      t14_application_activated: ${{ steps.t14_activation.outputs.activated }}
+      t14_publication_only: ${{ steps.t14_activation.outputs.publication_only }}
     steps:
       - name: Check out validated GitOps source branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           repository: ${{ needs.prepare.outputs.gitops_repository }}
-          ref: ${{ needs.prepare.outputs.gitops_base_branch }}
+          # Descriptor validation binds stagingBranch to the trunk branch used by Argo.
+          ref: ${{ needs.prepare.outputs.gitops_staging_branch }}
           token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
           path: gitops
 
@@ -483,7 +487,7 @@ jobs:
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ github.sha }}
-          TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_staging_branch }}
           T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
           T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
         run: |
@@ -503,7 +507,65 @@ jobs:
           fi
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Detect T14 Application activation
+        id: t14_activation
+        shell: bash
+        env:
+          T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
+        run: |
+          set -euo pipefail
+          if [[ "$T14_ENABLED" != true ]]; then
+            printf 'activated=true\npublication_only=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          response_file="$RUNNER_TEMP/t14-application.json"
+          http_code="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+          case "$http_code" in
+            200)
+              jq -e --arg application "$APPLICATION" \
+                '.metadata.name == $application' "$response_file" >/dev/null
+              printf 'activated=true\npublication_only=false\n' >> "$GITHUB_OUTPUT"
+              echo "T14 Application $APPLICATION is active; retaining the Argo health gate."
+              ;;
+            404)
+              printf 'activated=false\npublication_only=true\n' >> "$GITHUB_OUTPUT"
+              echo "T14 Application $APPLICATION is not activated (Argo CD returned HTTP 404)."
+              ;;
+            *)
+              echo "Could not determine whether T14 Application $APPLICATION is active (Argo CD returned HTTP $http_code)." >&2
+              cat "$response_file" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Report T14 publication-only result
+        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'false'
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
+          REVISION: ${{ steps.commit.outputs.revision }}
+        run: |
+          set -euo pipefail
+          echo "T14 publication-only: verified image digests and DSSE proofs were committed at GitOps revision $REVISION."
+          echo "T14 Application $APPLICATION is not activated; Argo health and production promotion are deferred until a separate activation-aware run."
+          {
+            echo "### T14 publication-only"
+            echo
+            echo "The GitOps Application `$APPLICATION` is not activated (Argo CD returned HTTP 404)."
+            echo "Verified image digests and builder DSSE proofs were committed at revision `$REVISION`."
+            echo "Argo health and production promotion are deferred until a separate activation-aware run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Wait for Argo CD staging health
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         shell: bash
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -528,7 +590,7 @@ jobs:
           exit 1
 
       - name: Wait for Argo CD T14 health
-        if: needs.prepare.outputs.t14_enabled == 'true'
+        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'true'
         shell: bash
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -553,12 +615,14 @@ jobs:
           exit 1
 
       - name: Check out application for smoke test
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           path: application
 
       - name: Detect a Node dependency cache for the smoke test
         id: smoke_node_cache
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -587,6 +651,7 @@ jobs:
           echo "path=" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js runtime
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
@@ -594,6 +659,7 @@ jobs:
           cache-dependency-path: ${{ steps.smoke_node_cache.outputs.path }}
 
       - name: Run fixed staging smoke contract
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         working-directory: application
         shell: bash
         env:
@@ -608,7 +674,9 @@ jobs:
     needs: [prepare, promote-staging]
     if: >-
       always() && needs.prepare.result == 'success' &&
-      (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped')
+      (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped') &&
+      (needs.prepare.outputs.t14_enabled != 'true' ||
+      needs.promote-staging.outputs.t14_application_activated == 'true')
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 15
     steps:

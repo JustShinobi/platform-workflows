@@ -168,6 +168,10 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
     if promotion_mode == "staging-and-production":
         for key in ("stagingBranch",):
             _string(gitops[key], f"gitops.{key}", REF)
+        if gitops["stagingBranch"] != gitops["baseBranch"]:
+            raise InvalidDescriptor(
+                "gitops.stagingBranch must match gitops.baseBranch for trunk-based GitOps"
+            )
         for key in ("stagingPath",):
             _relative_path(gitops[key], f"gitops.{key}")
         for key in ("stagingApplication",):

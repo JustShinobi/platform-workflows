@@ -55,6 +55,54 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
 
+    def test_t14_publication_only_mode_is_explicit_when_application_is_absent(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        activation = release.split("- name: Detect T14 Application activation", 1)[1]
+        self.assertIn("http_code=\"$(curl", activation)
+        self.assertIn("404)", activation)
+        self.assertIn("activated=false", activation)
+        self.assertIn("publication_only=true", activation)
+        self.assertIn("T14 publication-only", activation)
+        self.assertIn("Argo health and production promotion are deferred", activation)
+        self.assertIn("*)", activation)
+        self.assertIn("Could not determine whether T14 Application", activation)
+        self.assertIn("exit 1", activation)
+
+    def test_t14_active_application_keeps_both_health_and_promotion_gates(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        activation = release.split("- name: Detect T14 Application activation", 1)[1]
+        self.assertIn("200)", activation)
+        self.assertIn("activated=true", activation)
+        t14_health = release.split("- name: Wait for Argo CD T14 health", 1)[1]
+        self.assertIn("steps.t14_activation.outputs.activated == 'true'", t14_health)
+
+    def test_t14_absent_application_cannot_reach_production_promotion(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        production = release.split("  propose-production:", 1)[1]
+        self.assertIn("needs.prepare.outputs.t14_enabled != 'true'", production)
+        self.assertIn("needs.promote-staging.outputs.t14_application_activated == 'true'", production)
+
+    def test_t14_publication_only_does_not_bypass_proof_validation(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        update_index = release.index("- name: Update T14 image patches")
+        activation_index = release.index("- name: Detect T14 Application activation")
+        self.assertLess(update_index, activation_index)
+        action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("validate_t14_promotion.py", action)
+        self.assertIn("test -d \"$T14_PROOF_DIRECTORY\"", action)
+        self.assertIn("test -s \"$T14_BASELINE_RELEASE_FILE\"", action)
+
+    def test_staging_publication_uses_the_descriptor_staging_branch(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
+        self.assertIn("ref: ${{ needs.prepare.outputs.gitops_staging_branch }}", staging)
+        self.assertIn(
+            "TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_staging_branch }}",
+            staging,
+        )
+
     def test_t14_baseline_fetch_binds_artifact_to_run_and_source_sha(self) -> None:
         action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(encoding="utf-8")
         self.assertIn("actions/runs/$T14_BASELINE_RUN_ID/artifacts", action)
