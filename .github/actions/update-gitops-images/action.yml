@@ -43,6 +43,10 @@ inputs:
     description: Historical source SHA bound to the baseline proof
     required: false
     default: ''
+  t14-baseline-workflow-sha:
+    description: Reviewed workflow revision that produced the baseline artifact
+    required: false
+    default: ''
   t14-proposed-source-sha:
     description: Current source SHA bound to proposal proofs
     required: false
@@ -86,6 +90,7 @@ runs:
         RELEASE_DIRECTORY: ${{ inputs.release-directory }}
         T14_PROOF_DIRECTORY: ${{ inputs.t14-proof-directory }}
         T14_BASELINE_SOURCE_SHA: ${{ inputs.t14-baseline-source-sha }}
+        T14_BASELINE_WORKFLOW_SHA: ${{ inputs.t14-baseline-workflow-sha }}
         T14_BUILDER_KEY_ID: ${{ inputs.t14-builder-key-id }}
         T14_BUILDER_PUBLIC_KEY_FILE: ${{ inputs.t14-builder-public-key-file }}
         T14_BASELINE_REPOSITORY: ${{ inputs.t14-baseline-repository }}
@@ -100,6 +105,7 @@ runs:
           exit 2
         fi
         if [ -z "$T14_BASELINE_SOURCE_SHA" ] || [ -z "$T14_BUILDER_KEY_ID" ] || \
+           [ -z "$T14_BASELINE_WORKFLOW_SHA" ] || \
            [ -z "$T14_BUILDER_PUBLIC_KEY_FILE" ] || [ -z "$T14_PROOF_DIRECTORY" ]; then
           echo "T14 promotion requires baseline identity and proof verification inputs" >&2
           exit 2
@@ -116,20 +122,20 @@ runs:
           "repos/$T14_BASELINE_REPOSITORY/actions/runs/$T14_BASELINE_RUN_ID/artifacts?per_page=100" \
           > "$metadata_file"
         match_count="$(jq -r --arg name "$T14_BASELINE_ARTIFACT_NAME" \
-          --arg run_id "$T14_BASELINE_RUN_ID" --arg source_sha "$T14_BASELINE_SOURCE_SHA" '
+          --arg run_id "$T14_BASELINE_RUN_ID" --arg workflow_sha "$T14_BASELINE_WORKFLOW_SHA" '
           [.artifacts[]? | select(
             .name == $name and .expired == false and
             ((.workflow_run.id // 0) | tostring) == $run_id and
-            .workflow_run.head_sha == $source_sha and
+            .workflow_run.head_sha == $workflow_sha and
             ((.size_in_bytes // 0) | tonumber) > 0
           )] | length' "$metadata_file")"
         test "$match_count" -eq 1
         artifact_id="$(jq -r --arg name "$T14_BASELINE_ARTIFACT_NAME" \
-          --arg run_id "$T14_BASELINE_RUN_ID" --arg source_sha "$T14_BASELINE_SOURCE_SHA" '
+          --arg run_id "$T14_BASELINE_RUN_ID" --arg workflow_sha "$T14_BASELINE_WORKFLOW_SHA" '
           .artifacts[] | select(
             .name == $name and .expired == false and
             ((.workflow_run.id // 0) | tostring) == $run_id and
-            .workflow_run.head_sha == $source_sha and
+            .workflow_run.head_sha == $workflow_sha and
             ((.size_in_bytes // 0) | tonumber) > 0
           ) | .id' "$metadata_file")"
         test "$artifact_id" != null
@@ -143,6 +149,7 @@ runs:
           --artifact-directory "$baseline_directory" \
           --proposed-release-file "$RELEASE_DIRECTORY/$T14_COMPONENT.json" \
           --expected-source-sha "$T14_BASELINE_SOURCE_SHA" \
+          --expected-workflow-sha "$T14_BASELINE_WORKFLOW_SHA" \
           --builder-key-id "$T14_BUILDER_KEY_ID" \
           --builder-public-key-file "$T14_BUILDER_PUBLIC_KEY_FILE" \
           --output-release-file "$baseline_release"

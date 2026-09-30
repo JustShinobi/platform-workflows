@@ -56,6 +56,7 @@ T14_ENABLED_KEYS = {
     "imageComponent",
     "sharedComponents",
     "baselineSourceSha",
+    "baselineWorkflowSha",
     "baselineRepository",
     "baselineRunId",
     "baselineArtifactName",
@@ -212,6 +213,7 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
         ):
             raise InvalidDescriptor("t14.sharedComponents must name distinct non-arm components")
         _string(t14["baselineSourceSha"], "t14.baselineSourceSha", GIT_SHA)
+        _string(t14["baselineWorkflowSha"], "t14.baselineWorkflowSha", GIT_SHA)
         _string(t14["baselineRepository"], "t14.baselineRepository", REPOSITORY)
         _string(t14["baselineRunId"], "t14.baselineRunId", RUN_ID)
         _string(t14["baselineArtifactName"], "t14.baselineArtifactName", ARTIFACT_NAME)
@@ -275,6 +277,7 @@ def main() -> int:
             "t14_image_component": data.get("t14", {}).get("imageComponent", ""),
             "t14_shared_components": ",".join(data.get("t14", {}).get("sharedComponents", [])),
             "t14_baseline_source_sha": data.get("t14", {}).get("baselineSourceSha", ""),
+            "t14_baseline_workflow_sha": data.get("t14", {}).get("baselineWorkflowSha", ""),
             "t14_baseline_repository": data.get("t14", {}).get("baselineRepository", ""),
             "t14_baseline_run_id": data.get("t14", {}).get("baselineRunId", ""),
             "t14_baseline_artifact_name": data.get("t14", {}).get("baselineArtifactName", ""),

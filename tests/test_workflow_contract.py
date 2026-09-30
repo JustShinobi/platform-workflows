@@ -51,6 +51,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("t14_baseline_repository", release)
         self.assertIn("t14_baseline_run_id", release)
         self.assertIn("t14_baseline_artifact_name", release)
+        self.assertIn("t14_baseline_workflow_sha", release)
         self.assertIn("t14-baseline-release-file", release)
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
@@ -126,18 +127,24 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(f"ref: ${{{{ {branch} }}}}", staging)
         self.assertIn(f"TARGET_BRANCH: ${{{{ {branch} }}}}", staging)
 
-    def test_t14_baseline_fetch_binds_artifact_to_run_and_source_sha(self) -> None:
+    def test_t14_baseline_fetch_binds_run_revision_and_application_source(self) -> None:
         action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(encoding="utf-8")
         self.assertIn("actions/runs/$T14_BASELINE_RUN_ID/artifacts", action)
         self.assertIn("workflow_run.id", action)
         self.assertIn("workflow_run.head_sha", action)
+        self.assertIn("--arg workflow_sha", action)
+        self.assertIn(".workflow_run.head_sha == $workflow_sha", action)
+        self.assertNotIn(".workflow_run.head_sha == $source_sha", action)
         self.assertIn("validate_t14_baseline_artifact.py", action)
+        self.assertIn('--expected-source-sha "$T14_BASELINE_SOURCE_SHA"', action)
+        self.assertIn("--expected-workflow-sha", action)
         self.assertIn("docker load --input", action)
         self.assertIn("docker push", action)
         self.assertIn('test "$loaded_image" = "$baseline_digest"', action)
         self.assertIn("pushed_digest", action)
         self.assertIn('test "$remote_digest" = "$baseline_digest"', action)
         self.assertIn("T14_BASELINE_SOURCE_SHA", action)
+        self.assertIn("T14_BASELINE_WORKFLOW_SHA", action)
 
     def test_t14_image_action_requires_proof_inputs_before_writing_images(self) -> None:
         action = (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
