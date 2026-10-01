@@ -71,7 +71,7 @@ jobs:
 
       - name: Validate delivery contract
         id: descriptor
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@071a07d7b149184aa9e1375d64aaec97569656d8
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           descriptor: ${{ inputs.descriptor }}
 
@@ -444,16 +444,16 @@ jobs:
           printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
 
       - name: Update staging image patches
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
-          allow-missing-components: ${{ needs.prepare.outputs.t14_shared_components || needs.prepare.outputs.t14_only_components || '' }}
+          allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
 
       - name: Update T14 image patches
         if: needs.prepare.outputs.t14_enabled == 'true'
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           images-file: gitops/${{ needs.prepare.outputs.t14_gitops_path }}/images.yaml
           release-directory: release
@@ -725,11 +725,12 @@ jobs:
           printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
 
       - name: Update production image patches
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
+          allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
 
       - name: Commit production promotion
         working-directory: gitops

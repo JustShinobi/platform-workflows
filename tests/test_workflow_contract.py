@@ -56,6 +56,34 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("t14-proof-directory", release)
         self.assertIn("t14-builder-public-key-file", release)
 
+    def test_t14_release_pins_actions_with_workflow_revision_support(self) -> None:
+        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        provenance_revision = "b282ff4cee929496450d58a2909c8ad28b84b9fc"
+        descriptor = (
+            "JustShinobi/platform-workflows/.github/actions/descriptor@"
+            + provenance_revision
+        )
+        updater = (
+            "JustShinobi/platform-workflows/.github/actions/update-gitops-images@"
+            + provenance_revision
+        )
+        self.assertIn(f"uses: {descriptor}", release)
+        update_uses = re.findall(
+            r"uses: (JustShinobi/platform-workflows/\.github/actions/update-gitops-images@\S+)",
+            release,
+        )
+        self.assertEqual(update_uses, [updater] * 3)
+        self.assertIn(
+            "t14_baseline_workflow_sha:",
+            (ROOT / ".github/actions/descriptor/action.yml").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "t14-baseline-workflow-sha:",
+            (ROOT / ".github/actions/update-gitops-images/action.yml").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_t14_publication_only_mode_is_explicit_when_application_is_absent(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         activation = release.split("- name: Detect T14 Application activation", 1)[1]
@@ -106,15 +134,21 @@ class WorkflowContractTests(unittest.TestCase):
             staging,
         )
 
-    def test_t14_only_release_components_can_be_absent_from_common_staging(self) -> None:
-        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        staging = release.split("  promote-staging:", 1)[1].split("  propose-production:", 1)[0]
-        self.assertIn("t14_only_components", release)
-        self.assertIn(
-            "needs.prepare.outputs.t14_shared_components || "
-            "needs.prepare.outputs.t14_only_components || ''",
-            staging,
+    def test_only_t14_only_components_may_be_missing_from_common_image_files(self) -> None:
+        import yaml
+
+        release = yaml.safe_load(
+            (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         )
+        expected = "${{ needs.prepare.outputs.t14_only_components || '' }}"
+        for job_name, step_name in (
+            ("promote-staging", "Update staging image patches"),
+            ("propose-production", "Update production image patches"),
+        ):
+            with self.subTest(job=job_name):
+                steps = release["jobs"][job_name]["steps"]
+                update = next(step for step in steps if step.get("name") == step_name)
+                self.assertEqual(update["with"]["allow-missing-components"], expected)
 
     def test_t14_staging_publication_selects_its_validated_branch(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
