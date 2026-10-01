@@ -9,6 +9,8 @@
 
 O **`platform-workflows`** é o motor centralizado de CI/CD e governança de entrega contínua da organização **JustShinobi / KyoNinja**. Ele implementa o padrão **Zero-Touch Progressive Delivery**: cada microserviço é construído uma única vez em runners internos, escaneado contra vulnerabilidades, publicado com digest imutável no **Zot Registry**, promovido automaticamente para **Staging**, validado via **Smoke Tests** e submetido para aprovação em **Produção** via Pull Request no repositório GitOps ([`k3s-gitops-prod`](https://github.com/JustShinobi/k3s-gitops-prod)).
 
+O fluxo T14 usa uma etapa separada de build e verificação no host: ele publica evidência proposta sem assinar e não promove automaticamente para Staging ou Produção.
+
 ---
 
 ## 🏛️ Fluxo de Entrega Progressiva (Delivery Flow)
@@ -178,6 +180,25 @@ Pull Request de produção; os campos e recursos de staging não são necessári
    - `staging`: Execução automática e não bloqueante.
    - `production-promotion`: Gate natural via Pull Request revisado por humanos.
    - `production-rollback`: Requer aprovação de mantenedores.
+
+## 🧪 T14: build aguardando verificação no host
+
+Um release cujo descriptor declara `t14.enabled: true` deve chamar o workflow com `t14_build_only: true`. Sem essa opção, o job de preparação falha antes de qualquer build. O modo também aceita um descriptor com T14 desabilitado para construir um candidato revisado sem ativar a aplicação.
+
+O caller deve fixar o commit aprovado e selecionar o executor T14:
+
+```yaml
+release:
+  uses: JustShinobi/platform-workflows/.github/workflows/application-release.yml@<COMMIT_SHA_40_CHARS>
+  with:
+    executor: t14
+    source_revision: <APPROVED_FULL_COMMIT_SHA>
+    t14_build_only: true
+```
+
+O workflow confere o SHA completo, verifica e constrói esse checkout. O artefato `t14-proposed-release-app` contém exatamente o OCI tar da aplicação `app` e um recibo schema 3 marcado `unsigned-awaiting-host-attestor`, vinculado ao commit da aplicação e à revisão e referência do workflow chamador que invocou este workflow reutilizável. Nenhuma chave privada de atestação entra no runner de build.
+
+O modo build-only não atualiza GitOps, não executa os gates de saúde ou smoke test do Argo CD e não abre um Pull Request de Produção. O host deve verificar a evidência em separado; então deriva os cinco envelopes dos alvos propostos a partir desse único build verificado. A promoção permanece adiada até esse fluxo de host verificado estar concluído. Releases sem `t14_build_only: true` preservam o fluxo normal de Staging e Produção.
 
 ---
 

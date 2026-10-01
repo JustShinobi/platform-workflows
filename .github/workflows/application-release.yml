@@ -8,11 +8,21 @@ on:
         required: false
         default: .ci/application.yaml
         type: string
+      source_revision:
+        description: Full application commit SHA to build; defaults to the caller commit
+        required: false
+        default: ''
+        type: string
       executor:
         description: Trusted build executor (arc or jit)
         required: false
         default: arc
         type: string
+      t14_build_only:
+        description: Build unsigned T14 proposed evidence for separate host verification
+        required: false
+        default: false
+        type: boolean
       skip_verify:
         description: Skip verification step
         required: false
@@ -65,15 +75,70 @@ jobs:
       t14_baseline_run_id: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
       t14_baseline_artifact_name: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
       t14_only_components: ${{ steps.descriptor.outputs.t14_only_components }}
+      t14_build_only: ${{ inputs.t14_build_only }}
+      source_revision: ${{ steps.source_revision.outputs.sha }}
     steps:
+      - name: Validate source revision input
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SOURCE_REVISION" ] && [[ ! "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_revision must be empty or a full 40-character lowercase commit SHA" >&2
+            exit 2
+          fi
+
       - name: Check out application
+        id: application
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
+          persist-credentials: false
+
+      - name: Record checked-out source revision
+        id: source_revision
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_revision || github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [ "$checked_out_sha" != "$EXPECTED_SOURCE_SHA" ]; then
+            echo "checked-out source does not match the requested full commit SHA" >&2
+            exit 2
+          fi
+          printf 'sha=%s\n' "$checked_out_sha" >> "$GITHUB_OUTPUT"
 
       - name: Validate delivery contract
         id: descriptor
         uses: JustShinobi/platform-workflows/.github/actions/descriptor@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           descriptor: ${{ inputs.descriptor }}
+
+      - name: Require T14 build-only mode
+        if: steps.descriptor.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          T14_BUILD_ONLY: ${{ inputs.t14_build_only }}
+        run: |
+          set -euo pipefail
+          if [ "$T14_BUILD_ONLY" != true ]; then
+            echo "T14 descriptors require t14_build_only=true until host verification and promotion are separate" >&2
+            exit 2
+          fi
+
+      - name: Require app component for build-only evidence
+        if: inputs.t14_build_only == true
+        shell: bash
+        env:
+          MATRIX: ${{ steps.descriptor.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          if ! jq -e 'any(.include[]?; .name == "app")' <<<"$MATRIX" >/dev/null; then
+            echo "t14_build_only requires an app component in the validated build matrix" >&2
+            exit 2
+          fi
 
       - name: Select bounded executor labels
         id: executor
@@ -89,25 +154,6 @@ jobs:
             *) echo "executor must be arc, t14, or jit" >&2; exit 2 ;;
           esac
 
-      - name: Validate T14 historical baseline coordinates
-        if: steps.descriptor.outputs.t14_enabled == 'true'
-        shell: bash
-        env:
-          BASELINE_SOURCE_SHA: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
-          BASELINE_WORKFLOW_SHA: ${{ steps.descriptor.outputs.t14_baseline_workflow_sha }}
-          BASELINE_REPOSITORY: ${{ steps.descriptor.outputs.t14_baseline_repository }}
-          BASELINE_RUN_ID: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
-          BASELINE_ARTIFACT_NAME: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
-          BASELINE_TOKEN: ${{ secrets.T14_BASELINE_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$BASELINE_SOURCE_SHA"
-          test -n "$BASELINE_WORKFLOW_SHA"
-          test -n "$BASELINE_REPOSITORY"
-          test -n "$BASELINE_RUN_ID"
-          test -n "$BASELINE_ARTIFACT_NAME"
-          test -n "$BASELINE_TOKEN"
-
   verify:
     name: Verify trusted source
     needs: prepare
@@ -115,11 +161,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+          persist-credentials: false
       - name: Check if commit was already verified on PR
         id: check_pr
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           FORCE_SKIP: ${{ inputs.skip_verify }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         with:
           script: |
             if (process.env.FORCE_SKIP === 'true') {
@@ -131,7 +181,7 @@ jobs:
               const checks = await github.rest.checks.listForRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: context.sha,
+                ref: process.env.SOURCE_SHA,
               });
               const verifyRuns = checks.data.check_runs.filter(r => 
                 r.name.toLowerCase().includes('verify') || 
@@ -141,11 +191,11 @@ jobs:
               );
               const allPassed = verifyRuns.length > 0 && verifyRuns.every(r => r.conclusion === 'success');
               if (allPassed) {
-                console.log(`Commit ${context.sha} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
+                console.log(`Commit ${process.env.SOURCE_SHA} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
                 core.setOutput('skip', 'true');
                 return;
               }
-              console.log(`Commit ${context.sha} needs verification (passed checks: ${verifyRuns.length}).`);
+              console.log(`Commit ${process.env.SOURCE_SHA} needs verification (passed checks: ${verifyRuns.length}).`);
             } catch (err) {
               console.log(`Could not check commit status (${err.message}). Proceeding with verification.`);
             }
@@ -203,6 +253,9 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+          persist-credentials: false
 
       - name: Verify mounted Zot credentials
         shell: bash
@@ -219,7 +272,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Prepare T14 OCI output directory
-        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
         shell: bash
         run: |
           set -euo pipefail
@@ -236,72 +289,120 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms }}
           push: true
-          # The signed T14 builder envelope hashes the exact OCI layout below.
           # BuildKit's default provenance/SBOM exporter wraps the registry
           # digest in an attestation index but does not copy that index blob to
-          # the local OCI exporter. Keep those two outputs separate: Anchore
-          # emits the SBOM artifact below, while this build emits the exact
-          # single-platform image manifest consumed by the DSSE producer.
+          # the local OCI exporter. Anchore emits the SBOM artifact below;
+          # build-only host verification consumes this exact OCI image layout.
           provenance: false
           sbom: false
-          tags: ${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.name }}
-          outputs: ${{ needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component && format('type=oci,dest=.ci/t14/oci-{0},tar=false', matrix.name) || '' }}
+          tags: ${{ matrix.image }}:sha-${{ needs.prepare.outputs.source_revision }}-${{ matrix.name }}
+          outputs: ${{ needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app' && 'type=oci,dest=.ci/t14/oci-app,tar=false' || '' }}
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }}
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }},mode=max
 
-      - name: Set up pinned Python for T14 proof
-        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+      - name: Set up Python for T14 receipt
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
         uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # v5.4.0
         with:
           python-version: '3.12'
 
-      - name: Set up uv for T14 proof
-        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-
-      - name: Produce T14 builder proofs from immutable CI inputs
-        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+      - name: Create unsigned T14 proposed artifact
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
         shell: bash
         env:
-          T14_TARGETS: ${{ needs.prepare.outputs.t14_builder_targets }}
-          T14_KEY_ID: ${{ needs.prepare.outputs.t14_builder_key_id }}
           T14_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          T14_KEY_PATH: /run/secrets/t14/builder-key/private-key
+          T14_APPLICATION_REVISION: ${{ needs.prepare.outputs.source_revision }}
+          T14_WORKFLOW_REVISION: ${{ github.workflow_sha }}
+          T14_WORKFLOW_REF: ${{ github.workflow_ref }}
+          T14_RUN_ID: ${{ github.run_id }}
+          T14_RUN_ATTEMPT: ${{ github.run_attempt }}
+          T14_OCI_LAYOUT: .ci/t14/oci-app
+          T14_OCI_ARCHIVE: .ci/t14/release-t14-proposed-app.oci.tar
+          T14_RECEIPT: .ci/t14/release-t14-proposed-app.json
         run: |
           set -euo pipefail
-          test -s "$T14_KEY_PATH"
-          test -n "$T14_KEY_ID"
-          test -n "$T14_IMAGE_DIGEST"
-          targets_text="${T14_TARGETS//,/ }"
-          read -r -a targets <<< "$targets_text"
-          test "${#targets[@]}" -eq 6
-          proposed_count=0
-          for target in "${targets[@]}"; do
-            if [ "$target" = baseline ]; then
-              continue
-            fi
-            uv run --frozen --no-dev python tools/t14_builder_attestation.py \
-              --repository-root . \
-              --oci-layout ".ci/t14/oci-${{ matrix.name }}" \
-              --lock-file uv.lock \
-              --target-name "$target" \
-              --image-digest "$T14_IMAGE_DIGEST" \
-              --key-id "$T14_KEY_ID" \
-              --private-key-file "$T14_KEY_PATH" \
-              --output ".ci/t14/builder-proposed-${target}.dsse"
-            proposed_count=$((proposed_count + 1))
-          done
-          test "$proposed_count" -eq 5
-          test "$(find .ci/t14 -maxdepth 1 -name 'builder-proposed-*.dsse' -type f | wc -l)" -eq 5
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import tarfile
+          from pathlib import Path
 
-      - name: Upload T14 builder proofs
-        if: needs.prepare.outputs.t14_enabled == 'true' && matrix.name == needs.prepare.outputs.t14_image_component
+          image_digest = os.environ["T14_IMAGE_DIGEST"]
+          application_revision = os.environ["T14_APPLICATION_REVISION"]
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
+              raise SystemExit("image build did not return a valid immutable digest")
+          if re.fullmatch(r"[0-9a-f]{40}", application_revision) is None:
+              raise SystemExit("checked-out application revision is not a full commit SHA")
+          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != application_revision:
+              raise SystemExit("receipt source revision differs from the checked-out application")
+
+          layout = Path(os.environ["T14_OCI_LAYOUT"])
+          archive_path = Path(os.environ["T14_OCI_ARCHIVE"])
+          receipt_path = Path(os.environ["T14_RECEIPT"])
+          for name in ("oci-layout", "index.json", "blobs"):
+              path = layout / name
+              if not path.exists() or path.is_symlink():
+                  raise SystemExit(f"OCI layout is missing a safe {name} entry")
+          if not (layout / "oci-layout").is_file() or not (layout / "index.json").is_file():
+              raise SystemExit("OCI layout metadata entries must be regular files")
+          if not (layout / "blobs").is_dir():
+              raise SystemExit("OCI layout blobs entry must be a directory")
+          if any(path.is_symlink() for path in layout.rglob("*")):
+              raise SystemExit("OCI layout must not contain symbolic links")
+
+          archive_path.parent.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
+              for name in ("oci-layout", "index.json", "blobs"):
+                  archive.add(layout / name, arcname=name)
+
+          source_archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"])
+          receipt = {
+              "schema_version": 3,
+              "target_name": "proposed",
+              "workflow_revision": os.environ["T14_WORKFLOW_REVISION"],
+              "workflow_ref": os.environ["T14_WORKFLOW_REF"],
+              "workflow_run_id": os.environ["T14_RUN_ID"],
+              "run_attempt": int(os.environ["T14_RUN_ATTEMPT"]),
+              "application_revision": application_revision,
+              "image_digest": image_digest,
+              "oci_archive_sha256": "sha256:" + hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+              "source_sha256": hashlib.sha256(source_archive).hexdigest(),
+              "lock_sha256": hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(),
+              "proof_status": "unsigned-awaiting-host-attestor",
+          }
+          receipt_path.write_text(
+              json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload unsigned T14 proposed artifact
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: t14-builder-proof-${{ matrix.name }}
-          path: .ci/t14/builder-*.dsse
+          name: t14-proposed-release-app
+          path: |
+            .ci/t14/release-t14-proposed-app.oci.tar
+            .ci/t14/release-t14-proposed-app.json
           retention-days: 30
           if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Report deferred T14 host promotion
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### T14 host verification pending"
+            echo
+            echo 'The unsigned proposed artifact was uploaded as t14-proposed-release-app.'
+            echo "Staging and production promotion are deferred until host verification succeeds and a separate promotion workflow completes."
+            echo "The host derives five proposed target envelopes from this one verified build."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The Syft installer is fetched from GitHub at runtime. A transient 503
       # from that endpoint used to fail the whole release after the image had
@@ -399,7 +500,7 @@ jobs:
 
   promote-staging:
     name: Promote immutable digests to staging
-    if: needs.prepare.outputs.promotion_mode != 'production-only'
+    if: needs.prepare.outputs.t14_build_only != 'true' && needs.prepare.outputs.promotion_mode != 'production-only'
     needs: [prepare, build]
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 20
@@ -465,7 +566,7 @@ jobs:
           t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
           t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
           t14-baseline-workflow-sha: ${{ needs.prepare.outputs.t14_baseline_workflow_sha }}
-          t14-proposed-source-sha: ${{ github.sha }}
+          t14-proposed-source-sha: ${{ needs.prepare.outputs.source_revision }}
           t14-builder-public-key-file: /run/secrets/t14/builder-key/public-key
           t14-baseline-repository: ${{ needs.prepare.outputs.t14_baseline_repository }}
           t14-baseline-run-id: ${{ needs.prepare.outputs.t14_baseline_run_id }}
@@ -492,7 +593,7 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
           TARGET_BRANCH: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
           T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
           T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
@@ -623,7 +724,9 @@ jobs:
         if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
           path: application
+          persist-credentials: false
 
       - name: Detect a Node dependency cache for the smoke test
         id: smoke_node_cache
@@ -679,6 +782,7 @@ jobs:
     needs: [prepare, promote-staging]
     if: >-
       always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.t14_build_only != 'true' &&
       (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped') &&
       (needs.prepare.outputs.t14_enabled != 'true' ||
       needs.promote-staging.outputs.t14_application_activated == 'true')
@@ -704,7 +808,7 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         run: |
           set -euo pipefail
           branch="promote/${APPLICATION}/${SOURCE_SHA}"
@@ -737,7 +841,7 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
           BRANCH: ${{ steps.production.outputs.branch }}
         run: |
           set -euo pipefail
@@ -758,7 +862,7 @@ jobs:
           HEAD_BRANCH: ${{ steps.production.outputs.branch }}
           BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         with:
           github-token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
           script: |
