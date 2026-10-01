@@ -175,8 +175,22 @@ class DescriptorTests(unittest.TestCase):
             **value["components"][0], "name": "proxy", "workload": "example-proxy",
             "container": "proxy",
         })
+        for component, container in (
+            ("t14-observer", "observer"),
+            ("t14-readonly-executor", "t14-readonly-executor"),
+        ):
+            value["components"].append({
+                **value["components"][0],
+                "name": component,
+                "workload": component,
+                "container": container,
+                "t14Only": True,
+            })
         value["gitops"]["stagingBranch"] = "main"
         value["t14"] = yaml.safe_load(yaml.safe_dump(T14_CONTRACT))
+        value["t14"]["sharedComponents"] = [
+            "proxy", "t14-observer", "t14-readonly-executor"
+        ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             descriptor = self.write(root, value)
@@ -199,6 +213,8 @@ class DescriptorTests(unittest.TestCase):
                 line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()
             )
             self.assertEqual(outputs["t14_baseline_workflow_sha"], T14_CONTRACT["baselineWorkflowSha"])
+            self.assertEqual(outputs["t14_shared_components"], "proxy,t14-observer,t14-readonly-executor")
+            self.assertEqual(outputs["t14_only_components"], "t14-observer,t14-readonly-executor")
 
     def test_rejects_an_enabled_t14_staging_branch_that_does_not_match_the_trunk(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))

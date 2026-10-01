@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -351,6 +353,73 @@ class GitOpsImageTests(unittest.TestCase):
                 data["spec"]["template"]["spec"]["containers"][0]["image"],
                 "registry.lan/app@sha256:" + "a" * 64,
             )
+
+    def test_common_update_allows_two_t14_only_components_but_requires_proxy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images.yaml"
+            release_dir = root / "release"
+            release_dir.mkdir()
+            fragments = (
+                self._fragment("app", "registry.lan/app", "a", "app", "app"),
+                self._fragment("proxy", "registry.lan/proxy", "b", "proxy", "proxy"),
+                self._fragment(
+                    "t14-observer", "registry.lan/observer", "c", "t14-observer", "observer"
+                ),
+                self._fragment(
+                    "t14-readonly-executor",
+                    "registry.lan/executor",
+                    "d",
+                    "t14-readonly-executor",
+                    "t14-readonly-executor",
+                ),
+            )
+            for fragment in fragments:
+                (release_dir / f"{fragment['component']}.json").write_text(
+                    json.dumps(fragment), encoding="utf-8"
+                )
+
+            def common_images(*workloads: str) -> str:
+                documents = [
+                    {
+                        "kind": "Deployment",
+                        "metadata": {"name": workload},
+                        "spec": {
+                            "template": {
+                                "spec": {"containers": [{"name": workload, "image": "old"}]}
+                            }
+                        },
+                    }
+                    for workload in workloads
+                ]
+                return "---\n".join(
+                    yaml.safe_dump(document, sort_keys=False) for document in documents
+                )
+
+            command = [
+                sys.executable,
+                str(Path(__file__).parents[1] / "scripts/update_gitops_images.py"),
+                str(images),
+                str(release_dir),
+                "--allow-missing-components",
+                "t14-observer",
+                "t14-readonly-executor",
+            ]
+            images.write_text(common_images("app", "proxy"), encoding="utf-8")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            updated = list(yaml.safe_load_all(images.read_text(encoding="utf-8")))
+            self.assertEqual(
+                [item["spec"]["template"]["spec"]["containers"][0]["image"] for item in updated],
+                ["registry.lan/app@sha256:" + "a" * 64, "registry.lan/proxy@sha256:" + "b" * 64],
+            )
+
+            missing_proxy = common_images("app")
+            images.write_text(missing_proxy, encoding="utf-8")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("proxy/proxy", result.stderr)
+            self.assertEqual(images.read_text(encoding="utf-8"), missing_proxy)
 
     def test_t14_update_requires_distinct_baseline_release(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
