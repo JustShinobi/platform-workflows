@@ -7,7 +7,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'ubuntu-latest'
+        default: 'arc-k3s'
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ permissions:
 jobs:
   commit-lint:
     name: Lint PR Title and Commits
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
     steps:
       - name: Validate PR Title (Conventional Commits)
         if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'

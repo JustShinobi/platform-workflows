@@ -8,18 +8,28 @@ on:
         required: false
         default: .ci/application.yaml
         type: string
+      source_revision:
+        description: Full application commit SHA to build; defaults to the caller commit
+        required: false
+        default: ''
+        type: string
       executor:
         description: Trusted build executor (arc or jit)
         required: false
         default: arc
         type: string
+      t14_build_only:
+        description: Build unsigned T14 proposed evidence for separate host verification
+        required: false
+        default: false
+        type: boolean
       skip_verify:
         description: Skip verification step
         required: false
         default: false
         type: boolean
       upload_auxiliary_artifacts:
-        description: Upload Docker build records and standalone SBOM copies
+        description: Upload optional Docker build records
         required: false
         default: true
         type: boolean
@@ -30,6 +40,8 @@ on:
         required: true
       ARGOCD_AUTH_TOKEN:
         required: true
+      T14_BASELINE_TOKEN:
+        required: false
 
 concurrency:
   group: release-${{ github.repository }}
@@ -54,15 +66,84 @@ jobs:
       gitops_production_path: ${{ steps.descriptor.outputs.gitops_production_path }}
       gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
       image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
+      promotion_mode: ${{ steps.descriptor.outputs.gitops_promotion_mode }}
+      t14_enabled: ${{ steps.descriptor.outputs.t14_enabled }}
+      t14_builder_key_id: ${{ steps.descriptor.outputs.t14_builder_key_id }}
+      t14_builder_targets: ${{ steps.descriptor.outputs.t14_builder_targets }}
+      t14_gitops_path: ${{ steps.descriptor.outputs.t14_gitops_path }}
+      t14_gitops_application: ${{ steps.descriptor.outputs.t14_gitops_application }}
+      t14_image_component: ${{ steps.descriptor.outputs.t14_image_component }}
+      t14_shared_components: ${{ steps.descriptor.outputs.t14_shared_components }}
+      t14_baseline_source_sha: ${{ steps.descriptor.outputs.t14_baseline_source_sha }}
+      t14_baseline_workflow_sha: ${{ steps.descriptor.outputs.t14_baseline_workflow_sha }}
+      t14_baseline_repository: ${{ steps.descriptor.outputs.t14_baseline_repository }}
+      t14_baseline_run_id: ${{ steps.descriptor.outputs.t14_baseline_run_id }}
+      t14_baseline_artifact_name: ${{ steps.descriptor.outputs.t14_baseline_artifact_name }}
+      t14_only_components: ${{ steps.descriptor.outputs.t14_only_components }}
+      t14_build_only: ${{ inputs.t14_build_only }}
+      source_revision: ${{ steps.source_revision.outputs.sha }}
     steps:
+      - name: Validate source revision input
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SOURCE_REVISION" ] && [[ ! "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_revision must be empty or a full 40-character lowercase commit SHA" >&2
+            exit 2
+          fi
+
       - name: Check out application
+        id: application
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ inputs.source_revision || github.sha }}
+          persist-credentials: false
+
+      - name: Record checked-out source revision
+        id: source_revision
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_revision || github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [ "$checked_out_sha" != "$EXPECTED_SOURCE_SHA" ]; then
+            echo "checked-out source does not match the requested full commit SHA" >&2
+            exit 2
+          fi
+          printf 'sha=%s\n' "$checked_out_sha" >> "$GITHUB_OUTPUT"
 
       - name: Validate delivery contract
         id: descriptor
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@v1
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           descriptor: ${{ inputs.descriptor }}
+
+      - name: Require T14 build-only mode
+        if: steps.descriptor.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          T14_BUILD_ONLY: ${{ inputs.t14_build_only }}
+        run: |
+          set -euo pipefail
+          if [ "$T14_BUILD_ONLY" != true ]; then
+            echo "T14 descriptors require t14_build_only=true until host verification and promotion are separate" >&2
+            exit 2
+          fi
+
+      - name: Require app component for build-only evidence
+        if: inputs.t14_build_only == true
+        shell: bash
+        env:
+          MATRIX: ${{ steps.descriptor.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          if ! jq -e 'any(.include[]?; .name == "app")' <<<"$MATRIX" >/dev/null; then
+            echo "t14_build_only requires an app component in the validated build matrix" >&2
+            exit 2
+          fi
 
       - name: Select bounded executor labels
         id: executor
@@ -73,8 +154,9 @@ jobs:
           set -euo pipefail
           case "$EXECUTOR" in
             arc) printf 'runner=["arc-k3s"]\n' >> "$GITHUB_OUTPUT" ;;
+            t14) printf 'runner=["arc-k3s-ninjasre-t14"]\n' >> "$GITHUB_OUTPUT" ;;
             jit) printf 'runner=["self-hosted","proxmox-lxc","crossbuild"]\n' >> "$GITHUB_OUTPUT" ;;
-            *) echo "executor must be arc or jit" >&2; exit 2 ;;
+            *) echo "executor must be arc, t14, or jit" >&2; exit 2 ;;
           esac
 
   verify:
@@ -84,11 +166,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+          persist-credentials: false
       - name: Check if commit was already verified on PR
         id: check_pr
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           FORCE_SKIP: ${{ inputs.skip_verify }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         with:
           script: |
             if (process.env.FORCE_SKIP === 'true') {
@@ -100,7 +186,7 @@ jobs:
               const checks = await github.rest.checks.listForRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: context.sha,
+                ref: process.env.SOURCE_SHA,
               });
               const verifyRuns = checks.data.check_runs.filter(r => 
                 r.name.toLowerCase().includes('verify') || 
@@ -110,37 +196,47 @@ jobs:
               );
               const allPassed = verifyRuns.length > 0 && verifyRuns.every(r => r.conclusion === 'success');
               if (allPassed) {
-                console.log(`Commit ${context.sha} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
+                console.log(`Commit ${process.env.SOURCE_SHA} already verified in PR with ${verifyRuns.length} green checks. Skipping redundant verify.`);
                 core.setOutput('skip', 'true');
                 return;
               }
-              console.log(`Commit ${context.sha} needs verification (passed checks: ${verifyRuns.length}).`);
+              console.log(`Commit ${process.env.SOURCE_SHA} needs verification (passed checks: ${verifyRuns.length}).`);
             } catch (err) {
               console.log(`Could not check commit status (${err.message}). Proceeding with verification.`);
             }
             core.setOutput('skip', 'false');
-      - name: Detect a Node dependency cache
+      - name: Detect the Node package manager
         id: node_cache
         if: steps.check_pr.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          # `actions/setup-node` fails outright when `cache` is set and no
-          # lockfile matches at the repository root. A repository whose Node
-          # workspace lives in a subdirectory — or which uses a package manager
-          # other than npm there — has nothing to match and cannot be verified
-          # at all, which is a cache optimisation deciding whether CI runs.
-          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+          if [ -f pnpm-lock.yaml ]; then
+            echo "kind=pnpm" >> "$GITHUB_OUTPUT"
+            echo "path=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          elif [ -f yarn.lock ]; then
+            echo "kind=yarn" >> "$GITHUB_OUTPUT"
+            echo "path=yarn.lock" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             echo "kind=npm" >> "$GITHUB_OUTPUT"
+            if [ -f package-lock.json ]; then
+              echo "path=package-lock.json" >> "$GITHUB_OUTPUT"
+            else
+              echo "path=npm-shrinkwrap.json" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "kind=" >> "$GITHUB_OUTPUT"
+            echo "path=" >> "$GITHUB_OUTPUT"
           fi
       - name: Set up Node.js runtime
         if: steps.check_pr.outputs.skip != 'true'
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: ${{ steps.node_cache.outputs.kind }}
+          # pnpm is enabled after Node is installed; resolving its cache here
+          # would fail before Corepack can create the pnpm shim.
+          cache: ${{ steps.node_cache.outputs.kind == 'npm' && 'npm' || steps.node_cache.outputs.kind == 'yarn' && 'yarn' || '' }}
+          cache-dependency-path: ${{ steps.node_cache.outputs.path }}
       - name: Run repository verification contract
         if: steps.check_pr.outputs.skip != 'true'
         shell: bash
@@ -162,6 +258,9 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
+          persist-credentials: false
 
       - name: Verify mounted Zot credentials
         shell: bash
@@ -177,6 +276,15 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      - name: Prepare T14 OCI output directory
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          rm -rf ".ci/t14/oci-${{ matrix.name }}"
+          mkdir -p ".ci/t14"
+
       - name: Build and publish immutable candidate
         id: image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -188,19 +296,177 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platforms }}
           push: true
-          provenance: mode=max
-          sbom: true
-          tags: ${{ matrix.image }}:sha-${{ github.sha }}-${{ matrix.name }}
+          # BuildKit's default provenance/SBOM exporter wraps the registry
+          # digest in an attestation index but does not copy that index blob to
+          # the local OCI exporter. Anchore emits the SBOM artifact below;
+          # build-only host verification consumes this exact OCI image layout.
+          provenance: false
+          sbom: false
+          tags: ${{ matrix.image }}:sha-${{ needs.prepare.outputs.source_revision }}-${{ matrix.name }}
+          outputs: ${{ needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app' && 'type=oci,dest=.ci/t14/oci-app,tar=false' || '' }}
           cache-from: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }}
           cache-to: type=registry,ref=${{ matrix.image }}:buildcache-${{ matrix.name }},mode=max
 
-      - name: Generate SPDX SBOM
+      - name: Set up Python for T14 receipt
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Create unsigned T14 proposed artifact
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        shell: bash
+        env:
+          T14_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          T14_APPLICATION_REVISION: ${{ needs.prepare.outputs.source_revision }}
+          T14_WORKFLOW_REVISION: ${{ github.workflow_sha }}
+          T14_WORKFLOW_REF: ${{ github.workflow_ref }}
+          T14_RUN_ID: ${{ github.run_id }}
+          T14_RUN_ATTEMPT: ${{ github.run_attempt }}
+          T14_OCI_LAYOUT: .ci/t14/oci-app
+          T14_OCI_ARCHIVE: .ci/t14/release-t14-proposed-app.oci.tar
+          T14_RECEIPT: .ci/t14/release-t14-proposed-app.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import tarfile
+          from pathlib import Path
+
+          image_digest = os.environ["T14_IMAGE_DIGEST"]
+          application_revision = os.environ["T14_APPLICATION_REVISION"]
+          if re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
+              raise SystemExit("image build did not return a valid immutable digest")
+          if re.fullmatch(r"[0-9a-f]{40}", application_revision) is None:
+              raise SystemExit("checked-out application revision is not a full commit SHA")
+          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != application_revision:
+              raise SystemExit("receipt source revision differs from the checked-out application")
+
+          layout = Path(os.environ["T14_OCI_LAYOUT"])
+          archive_path = Path(os.environ["T14_OCI_ARCHIVE"])
+          receipt_path = Path(os.environ["T14_RECEIPT"])
+          for name in ("oci-layout", "index.json", "blobs"):
+              path = layout / name
+              if not path.exists() or path.is_symlink():
+                  raise SystemExit(f"OCI layout is missing a safe {name} entry")
+          if not (layout / "oci-layout").is_file() or not (layout / "index.json").is_file():
+              raise SystemExit("OCI layout metadata entries must be regular files")
+          if not (layout / "blobs").is_dir():
+              raise SystemExit("OCI layout blobs entry must be a directory")
+          if any(path.is_symlink() for path in layout.rglob("*")):
+              raise SystemExit("OCI layout must not contain symbolic links")
+
+          archive_path.parent.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(archive_path, "w", format=tarfile.USTAR_FORMAT) as archive:
+              for name in ("oci-layout", "index.json", "blobs"):
+                  archive.add(layout / name, arcname=name)
+
+          source_archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"])
+          receipt = {
+              "schema_version": 3,
+              "target_name": "proposed",
+              "workflow_revision": os.environ["T14_WORKFLOW_REVISION"],
+              "workflow_ref": os.environ["T14_WORKFLOW_REF"],
+              "workflow_run_id": os.environ["T14_RUN_ID"],
+              "run_attempt": int(os.environ["T14_RUN_ATTEMPT"]),
+              "application_revision": application_revision,
+              "image_digest": image_digest,
+              "oci_archive_sha256": "sha256:" + hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+              "source_sha256": hashlib.sha256(source_archive).hexdigest(),
+              "lock_sha256": hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest(),
+              "proof_status": "unsigned-awaiting-host-attestor",
+          }
+          receipt_path.write_text(
+              json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload unsigned T14 proposed artifact
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: t14-proposed-release-app
+          path: |
+            .ci/t14/release-t14-proposed-app.oci.tar
+            .ci/t14/release-t14-proposed-app.json
+          retention-days: 30
+          if-no-files-found: error
+          include-hidden-files: true
+
+      - name: Report deferred T14 host promotion
+        if: needs.prepare.outputs.t14_build_only == 'true' && matrix.name == 'app'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### T14 host verification pending"
+            echo
+            echo 'The unsigned proposed artifact was uploaded as t14-proposed-release-app.'
+            echo "Staging and production promotion are deferred until host verification succeeds and a separate promotion workflow completes."
+            echo "The host derives five proposed target envelopes from this one verified build."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The Syft installer is fetched from GitHub at runtime. A transient 503
+      # from that endpoint used to fail the whole release after the image had
+      # already been published. Keep the evidence mandatory, but give the
+      # download two additional attempts before failing the job.
+      - name: Generate SPDX SBOM (attempt 1)
+        id: sbom_attempt_1
+        continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
           format: spdx-json
           output-file: sbom-${{ matrix.name }}.spdx.json
-          upload-artifact: ${{ inputs.upload_auxiliary_artifacts }}
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Wait before SPDX SBOM retry
+        if: steps.sbom_attempt_1.outcome == 'failure'
+        shell: bash
+        run: sleep 15
+
+      - name: Generate SPDX SBOM (attempt 2)
+        id: sbom_attempt_2
+        if: steps.sbom_attempt_1.outcome == 'failure'
+        continue-on-error: true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Wait before final SPDX SBOM retry
+        if: steps.sbom_attempt_2.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - name: Generate SPDX SBOM (attempt 3)
+        id: sbom_attempt_3
+        if: steps.sbom_attempt_2.outcome == 'failure'
+        continue-on-error: true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          syft-version: v1.42.3
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Validate SPDX SBOM evidence
+        if: always()
+        shell: bash
+        run: test -s "sbom-${{ matrix.name }}.spdx.json"
 
       - name: Scan published candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -241,15 +507,20 @@ jobs:
 
   promote-staging:
     name: Promote immutable digests to staging
+    if: needs.prepare.outputs.t14_build_only != 'true' && needs.prepare.outputs.promotion_mode != 'production-only'
     needs: [prepare, build]
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 20
+    outputs:
+      t14_application_activated: ${{ steps.t14_activation.outputs.activated }}
+      t14_publication_only: ${{ steps.t14_activation.outputs.publication_only }}
     steps:
       - name: Check out validated GitOps source branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           repository: ${{ needs.prepare.outputs.gitops_repository }}
-          ref: ${{ needs.prepare.outputs.gitops_base_branch }}
+          # Enabled T14 binds stagingBranch to the trunk; other releases retain baseBranch.
+          ref: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
           token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
           path: gitops
 
@@ -260,12 +531,68 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Download T14 builder proofs
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317 # v8.0.1
+        with:
+          pattern: t14-builder-proof-*
+          path: t14-proofs
+          merge-multiple: true
+
+      - name: Verify mounted Zot credentials for T14 baseline publication
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s /run/secrets/zot/config.json
+          docker_config="$RUNNER_TEMP/.docker"
+          install -d -m 0700 "$docker_config"
+          install -m 0600 /run/secrets/zot/config.json "$docker_config/config.json"
+          grep --fixed-strings --quiet 'registry.lan.kyo.ninja' "$docker_config/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
+
       - name: Update staging image patches
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
+          allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
+
+      - name: Update T14 image patches
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
+        with:
+          images-file: gitops/${{ needs.prepare.outputs.t14_gitops_path }}/images.yaml
+          release-directory: release
+          t14-targets: ${{ needs.prepare.outputs.t14_builder_targets }}
+          t14-component: ${{ needs.prepare.outputs.t14_image_component }}
+          t14-shared-components: ${{ needs.prepare.outputs.t14_shared_components }}
+          t14-baseline-release-file: ${{ runner.temp }}/t14-baseline/release-t14-baseline-app.fragment.json
+          t14-proof-directory: t14-proofs
+          t14-builder-key-id: ${{ needs.prepare.outputs.t14_builder_key_id }}
+          t14-baseline-source-sha: ${{ needs.prepare.outputs.t14_baseline_source_sha }}
+          t14-baseline-workflow-sha: ${{ needs.prepare.outputs.t14_baseline_workflow_sha }}
+          t14-proposed-source-sha: ${{ needs.prepare.outputs.source_revision }}
+          t14-builder-public-key-file: /run/secrets/t14/builder-key/public-key
+          t14-baseline-repository: ${{ needs.prepare.outputs.t14_baseline_repository }}
+          t14-baseline-run-id: ${{ needs.prepare.outputs.t14_baseline_run_id }}
+          t14-baseline-artifact-name: ${{ needs.prepare.outputs.t14_baseline_artifact_name }}
+          t14-baseline-token: ${{ secrets.T14_BASELINE_TOKEN }}
+
+      - name: Stage T14 builder proofs with the image promotion
+        if: needs.prepare.outputs.t14_enabled == 'true'
+        shell: bash
+        env:
+          T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
+        run: |
+          set -euo pipefail
+          test "$(find t14-proofs -maxdepth 1 -name '*.dsse' -type f | wc -l)" -eq 6
+          proof_dir="gitops/$T14_PATH/proofs"
+          install -d -m 0755 "$proof_dir"
+          for proof in t14-proofs/*.dsse; do
+            install -m 0644 "$proof" "$proof_dir/$(basename "$proof")"
+          done
 
       - name: Commit staging promotion
         id: commit
@@ -273,13 +600,18 @@ jobs:
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
-          TARGET_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          TARGET_BRANCH: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
+          T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
+          T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
         run: |
           set -euo pipefail
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
           git add -- "${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}"
+          if [ "$T14_ENABLED" = true ]; then
+            git add -- "$T14_PATH/images.yaml" "$T14_PATH/proofs"
+          fi
           if git diff --cached --quiet; then
             echo "No staging image change required"
           else
@@ -289,7 +621,64 @@ jobs:
           fi
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Detect T14 Application activation
+        id: t14_activation
+        shell: bash
+        env:
+          T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
+        run: |
+          set -euo pipefail
+          if [[ "$T14_ENABLED" != true ]]; then
+            printf 'activated=true\npublication_only=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          response_file="$RUNNER_TEMP/t14-application.json"
+          http_code="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+          case "$http_code" in
+            200)
+              jq -e --arg application "$APPLICATION" \
+                '.metadata.name == $application' "$response_file" >/dev/null
+              printf 'activated=true\npublication_only=false\n' >> "$GITHUB_OUTPUT"
+              echo "T14 Application $APPLICATION is active; retaining the Argo health gate."
+              ;;
+            404)
+              printf 'activated=false\npublication_only=true\n' >> "$GITHUB_OUTPUT"
+              echo "T14 Application $APPLICATION is not activated (Argo CD returned HTTP 404)."
+              ;;
+            *)
+              echo "Could not determine whether T14 Application $APPLICATION is active (Argo CD returned HTTP $http_code)." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Report T14 publication-only result
+        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'false'
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
+          REVISION: ${{ steps.commit.outputs.revision }}
+        run: |
+          set -euo pipefail
+          echo "T14 publication-only: verified image digests and DSSE proofs were committed at GitOps revision $REVISION."
+          echo "T14 Application $APPLICATION is not activated; Argo health and production promotion are deferred until a separate activation-aware run."
+          {
+            echo "### T14 publication-only"
+            echo
+            echo "The GitOps Application `$APPLICATION` is not activated (Argo CD returned HTTP 404)."
+            echo "Verified image digests and builder DSSE proofs were committed at revision `$REVISION`."
+            echo "Argo health and production promotion are deferred until a separate activation-aware run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Wait for Argo CD staging health
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         shell: bash
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -313,13 +702,42 @@ jobs:
           echo "Argo CD did not reconcile $APPLICATION to $REVISION in 10 minutes" >&2
           exit 1
 
+      - name: Wait for Argo CD T14 health
+        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'true'
+        shell: bash
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
+          REVISION: ${{ steps.commit.outputs.revision }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            status="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+              "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+            health="$(jq -r '.status.health.status // ""' <<<"$status")"
+            sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
+            revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
+            if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Argo CD did not reconcile $APPLICATION to $REVISION in 10 minutes" >&2
+          exit 1
+
       - name: Check out application for smoke test
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
           path: application
+          persist-credentials: false
 
       - name: Detect a Node dependency cache for the smoke test
         id: smoke_node_cache
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -333,9 +751,13 @@ jobs:
           # already happened and Argo CD has already reported the deployment
           # healthy. The run goes red for a cache it never needed, after the
           # thing it was verifying succeeded.
-          for lockfile in package-lock.json npm-shrinkwrap.json yarn.lock; do
+          for lockfile in pnpm-lock.yaml yarn.lock package-lock.json npm-shrinkwrap.json; do
             if [ -f "application/$lockfile" ]; then
-              echo "kind=npm" >> "$GITHUB_OUTPUT"
+              case "$lockfile" in
+                pnpm-lock.yaml) echo "kind=pnpm" >> "$GITHUB_OUTPUT" ;;
+                yarn.lock) echo "kind=yarn" >> "$GITHUB_OUTPUT" ;;
+                *) echo "kind=npm" >> "$GITHUB_OUTPUT" ;;
+              esac
               echo "path=application/$lockfile" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -344,13 +766,15 @@ jobs:
           echo "path=" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js runtime
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
-          cache: ${{ steps.smoke_node_cache.outputs.kind }}
+          cache: ${{ steps.smoke_node_cache.outputs.kind == 'npm' && 'npm' || steps.smoke_node_cache.outputs.kind == 'yarn' && 'yarn' || '' }}
           cache-dependency-path: ${{ steps.smoke_node_cache.outputs.path }}
 
       - name: Run fixed staging smoke contract
+        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
         working-directory: application
         shell: bash
         env:
@@ -363,6 +787,12 @@ jobs:
   propose-production:
     name: Open production promotion PR
     needs: [prepare, promote-staging]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.t14_build_only != 'true' &&
+      (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped') &&
+      (needs.prepare.outputs.t14_enabled != 'true' ||
+      needs.promote-staging.outputs.t14_application_activated == 'true')
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 15
     steps:
@@ -379,35 +809,58 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Update production image patches
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@v1
-        with:
-          images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
-          release-directory: release
-          mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
-
-      - name: Push promotion branch and open pull request
+      - name: Prepare production promotion branch
         id: production
         working-directory: gitops
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
-          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         run: |
           set -euo pipefail
           branch="promote/${APPLICATION}/${SOURCE_SHA}"
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          git switch -c "$branch"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            git switch -C "$branch" "origin/$branch"
+            echo "Reusing existing production promotion branch $branch"
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "Could not determine whether production promotion branch $branch exists" >&2
+              exit "$status"
+            fi
+            git switch -c "$branch"
+          fi
+          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Update production image patches
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@b282ff4cee929496450d58a2909c8ad28b84b9fc
+        with:
+          images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
+          release-directory: release
+          mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
+          allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
+
+      - name: Commit production promotion
+        working-directory: gitops
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          BRANCH: ${{ steps.production.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "platform-delivery[bot]"
+          git config user.email "platform-delivery[bot]@users.noreply.github.com"
           git add -- "${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}"
           if git diff --cached --quiet; then
             echo "Production already references these digests"
             exit 0
           fi
           git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to production"
-          git push origin "$branch"
-          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+          git push origin "$BRANCH"
 
       - name: Open production pull request
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -416,7 +869,7 @@ jobs:
           HEAD_BRANCH: ${{ steps.production.outputs.branch }}
           BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
         with:
           github-token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
           script: |
@@ -425,8 +878,11 @@ jobs:
             if (!head) return;
             const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
             if (existing.data.length) return;
+            const validation = process.env.PROMOTION_MODE === 'production-only'
+              ? 'validated by the repository verification checks'
+              : 'validated in staging';
             await github.rest.pulls.create({
               owner, repo, head, base: process.env.BASE_BRANCH,
               title: `chore(${process.env.APPLICATION}): promote ${process.env.SOURCE_SHA.slice(0, 12)} to production`,
-              body: `Promotes the exact image digests validated in staging.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              body: `Promotes the exact image digests ${validation}.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
