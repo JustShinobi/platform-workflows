@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      upload_auxiliary_artifacts:
+        description: Upload Docker build records and standalone SBOM copies
+        required: false
+        default: true
+        type: boolean
     secrets:
       PLATFORM_GITOPS_TOKEN:
         required: true
@@ -175,6 +180,8 @@ jobs:
       - name: Build and publish immutable candidate
         id: image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ inputs.upload_auxiliary_artifacts }}
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -193,6 +200,7 @@ jobs:
           image: ${{ matrix.image }}@${{ steps.image.outputs.digest }}
           format: spdx-json
           output-file: sbom-${{ matrix.name }}.spdx.json
+          upload-artifact: ${{ inputs.upload_auxiliary_artifacts }}
 
       - name: Scan published candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
