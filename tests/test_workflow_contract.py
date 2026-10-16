@@ -29,7 +29,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_zot_publication_is_never_github_hosted(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        self.assertIn('runner=["arc-k3s"]', release)
+        self.assertIn('runner=["arc-k3s-heavy"]', release)
         self.assertIn('runner=["arc-k3s-ninjasre-t14"]', release)
         self.assertIn('runner=["self-hosted","proxmox-lxc","crossbuild"]', release)
         self.assertNotIn("runs-on: ubuntu", release)

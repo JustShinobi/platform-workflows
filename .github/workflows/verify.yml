@@ -12,12 +12,12 @@ on:
         description: Runner type
         required: false
         type: string
-        default: arc-k3s
+        default: arc-k3s-medium
 
 jobs:
   verify:
     name: Verify (${{ matrix.task }})
-    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
+    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s-medium' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false

@@ -1,5 +1,8 @@
 self-hosted-runner:
   labels:
     - arc-k3s
+    - arc-k3s-light
+    - arc-k3s-medium
+    - arc-k3s-heavy
     - proxmox-lxc
     - crossbuild

@@ -22,7 +22,7 @@ on:
         description: Runner type
         required: false
         type: string
-        default: 'arc-k3s'
+        default: 'arc-k3s-light'
 
 permissions:
   contents: read
@@ -30,7 +30,7 @@ permissions:
 jobs:
   build-and-push-chart:
     name: Package and Push Helm Chart
-    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s' }}
+    runs-on: ${{ inputs.RUNS_ON || 'arc-k3s-light' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1

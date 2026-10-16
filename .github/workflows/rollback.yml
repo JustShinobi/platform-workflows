@@ -29,7 +29,7 @@ concurrency:
 jobs:
   rollback:
     name: Prepare ${{ inputs.environment }} rollback
-    runs-on: arc-k3s
+    runs-on: arc-k3s-light
     timeout-minutes: 15
     environment: ${{ inputs.environment == 'prod' && 'production-rollback' || 'staging-rollback' }}
     steps:
