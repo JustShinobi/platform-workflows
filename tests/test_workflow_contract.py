@@ -30,8 +30,9 @@ class WorkflowContractTests(unittest.TestCase):
     def test_zot_publication_is_never_github_hosted(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
         self.assertIn('runner=["arc-k3s-heavy"]', release)
+        self.assertIn('runner=["arc-k3s-medium"]', release)
+        self.assertIn('runner=["arc-k3s-light"]', release)
         self.assertIn('runner=["arc-k3s-ninjasre-t14"]', release)
-        self.assertIn('runner=["self-hosted","proxmox-lxc","crossbuild"]', release)
         self.assertNotIn("runs-on: ubuntu", release)
 
     def test_t14_build_only_requires_explicit_workflow_call_input(self) -> None:
@@ -522,7 +523,7 @@ class WorkflowContractTests(unittest.TestCase):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             text = path.read_text(encoding="utf-8")
             if path.name == "self-test.yml":
-                self.assertIn("runs-on: arc-k3s-platform-workflows", text)
+                self.assertIn("runs-on: arc-k3s-light", text)
             self.assertNotIn("runs-on: ubuntu", text, f"{path.name} still uses runs-on: ubuntu")
 
     def test_platform_pr_validation_requires_a_branch_in_this_repository(self) -> None:
@@ -533,7 +534,7 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/sync-secrets-infisical.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("runs-on: arc-k3s-platform-workflows", workflow)
+        self.assertIn("runs-on: arc-k3s-light", workflow)
         self.assertIn("INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}", workflow)
         self.assertNotIn("secrets.INFISICAL_CLIENT_SECRET ||", workflow)
 

@@ -154,16 +154,17 @@ jobs:
           set -euo pipefail
           case "$EXECUTOR" in
             arc) printf 'runner=["arc-k3s-heavy"]\n' >> "$GITHUB_OUTPUT" ;;
+            arc-medium) printf 'runner=["arc-k3s-medium"]\n' >> "$GITHUB_OUTPUT" ;;
+            arc-light) printf 'runner=["arc-k3s-light"]\n' >> "$GITHUB_OUTPUT" ;;
             t14) printf 'runner=["arc-k3s-ninjasre-t14"]\n' >> "$GITHUB_OUTPUT" ;;
-            jit) printf 'runner=["self-hosted","proxmox-lxc","crossbuild"]\n' >> "$GITHUB_OUTPUT" ;;
-            *) echo "executor must be arc, t14, or jit" >&2; exit 2 ;;
+            *) echo "executor must be arc, arc-medium, arc-light, or t14" >&2; exit 2 ;;
           esac
 
   verify:
     name: Verify trusted source
     needs: prepare
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
@@ -251,7 +252,7 @@ jobs:
     name: Build ${{ matrix.name }}
     needs: [prepare, verify]
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       max-parallel: 4

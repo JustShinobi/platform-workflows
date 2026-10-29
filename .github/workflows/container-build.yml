@@ -35,6 +35,7 @@ jobs:
   build-and-push-container:
     name: Build and Push Container Image
     runs-on: ${{ inputs.RUNS_ON || 'arc-k3s-heavy' }}
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
