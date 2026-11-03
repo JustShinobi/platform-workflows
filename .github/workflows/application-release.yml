@@ -742,9 +742,13 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 60); do
+            query=""
+            if [[ "$attempt" -eq 1 ]]; then
+              query="?refresh=normal"
+            fi
             status="$(curl --fail --silent --show-error \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
-              "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+              "$ARGOCD_SERVER/api/v1/applications/${APPLICATION}${query}")"
             health="$(jq -r '.status.health.status // ""' <<<"$status")"
             sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
             revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
@@ -767,9 +771,13 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 60); do
+            query=""
+            if [[ "$attempt" -eq 1 ]]; then
+              query="?refresh=normal"
+            fi
             status="$(curl --fail --silent --show-error \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
-              "$ARGOCD_SERVER/api/v1/applications/$APPLICATION")"
+              "$ARGOCD_SERVER/api/v1/applications/${APPLICATION}${query}")"
             health="$(jq -r '.status.health.status // ""' <<<"$status")"
             sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
             revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
