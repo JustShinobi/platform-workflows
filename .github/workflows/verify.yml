@@ -105,7 +105,7 @@ jobs:
         env:
           TASK: ${{ matrix.task }}
           PACKAGE_MANAGER: ${{ steps.node_cache.outputs.kind }}
-          NODE_OPTIONS: "--max-old-space-size=4096"
+          NODE_OPTIONS: "--max-old-space-size=2560"
         run: |
           set -euo pipefail
           if [[ -x "scripts/ci/$TASK" ]]; then
