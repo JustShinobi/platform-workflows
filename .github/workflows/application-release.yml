@@ -48,8 +48,8 @@ on:
         required: false
 
 concurrency:
-  group: release-${{ github.repository }}
-  cancel-in-progress: false
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   prepare:
