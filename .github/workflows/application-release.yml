@@ -820,16 +820,18 @@ jobs:
           while (( $(date +%s) < deadline )); do
             rem=$(( deadline - $(date +%s) ))
             (( rem > 0 )) || break
+            window=$(( rem < 5 ? rem : 5 ))
             while IFS= read -r line; do
-              [[ "$line" == data:* ]] || continue
               payload="${line#data:}"
+              payload="${payload#"${payload%%[![:space:]]*}"}"
+              [[ "$payload" == \{* ]] || continue
               health="$(jq -r '.result.application.status.health.status // ""' <<<"$payload" 2>/dev/null || true)"
               sync="$(jq -r '.result.application.status.sync.status // ""' <<<"$payload" 2>/dev/null || true)"
               revision="$(jq -r '.result.application.status.sync.revision // ""' <<<"$payload" 2>/dev/null || true)"
               if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
                 exit 0
               fi
-            done < <(curl --silent --no-buffer --max-time "$rem" \
+            done < <(curl --silent --no-buffer --max-time "$window" \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
               "$ARGOCD_SERVER/api/v1/stream/applications?name=${APPLICATION}" || true)
             if check_ready ""; then
@@ -867,16 +869,18 @@ jobs:
           while (( $(date +%s) < deadline )); do
             rem=$(( deadline - $(date +%s) ))
             (( rem > 0 )) || break
+            window=$(( rem < 5 ? rem : 5 ))
             while IFS= read -r line; do
-              [[ "$line" == data:* ]] || continue
               payload="${line#data:}"
+              payload="${payload#"${payload%%[![:space:]]*}"}"
+              [[ "$payload" == \{* ]] || continue
               health="$(jq -r '.result.application.status.health.status // ""' <<<"$payload" 2>/dev/null || true)"
               sync="$(jq -r '.result.application.status.sync.status // ""' <<<"$payload" 2>/dev/null || true)"
               revision="$(jq -r '.result.application.status.sync.revision // ""' <<<"$payload" 2>/dev/null || true)"
               if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
                 exit 0
               fi
-            done < <(curl --silent --no-buffer --max-time "$rem" \
+            done < <(curl --silent --no-buffer --max-time "$window" \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
               "$ARGOCD_SERVER/api/v1/stream/applications?name=${APPLICATION}" || true)
             if check_ready ""; then
@@ -945,9 +949,10 @@ jobs:
 
   propose-production:
     name: Open production promotion PR
-    needs: [prepare, promote-staging]
+    needs: [prepare, build, promote-staging]
     if: >-
       always() && needs.prepare.result == 'success' &&
+      needs.build.result == 'success' &&
       needs.prepare.outputs.t14_build_only != 'true' &&
       (needs.promote-staging.result == 'success' || needs.promote-staging.result == 'skipped') &&
       (needs.prepare.outputs.t14_enabled != 'true' ||
