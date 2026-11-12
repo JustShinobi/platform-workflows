@@ -401,14 +401,27 @@ class WorkflowContractTests(unittest.TestCase):
         )
         staging = workflow["jobs"]["promote-staging"]
         production = workflow["jobs"]["propose-production"]
+        self.assertIn("always()", staging["if"])
+        self.assertIn("needs.prepare.result == 'success'", staging["if"])
+        self.assertIn("needs.build.result == 'success'", staging["if"])
         self.assertIn("needs.prepare.outputs.t14_build_only != 'true'", staging["if"])
         self.assertIn("needs.prepare.outputs.promotion_mode != 'production-only'", staging["if"])
         self.assertIn("needs.prepare.outputs.t14_build_only != 'true'", production["if"])
+        self.assertIn(
+            "(needs.promote-staging.result == 'skipped' && needs.prepare.outputs.promotion_mode == 'production-only')",
+            production["if"],
+        )
         self.assertIn("needs.prepare.outputs.t14_enabled != 'true'", production["if"])
         self.assertIn(
             "needs.promote-staging.outputs.t14_application_activated == 'true'", production["if"]
         )
         self.assertNotIn("production-only", workflow["jobs"]["build"]["name"])
+        smoke_setup_node = next(
+            step
+            for step in staging["steps"]
+            if step.get("name") == "Set up Node.js runtime"
+        )
+        self.assertIs(smoke_setup_node["with"]["package-manager-cache"], False)
 
     def test_non_t14_staging_publication_keeps_the_base_branch(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")

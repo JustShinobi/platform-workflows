@@ -17,7 +17,11 @@ on:
         type: string
     secrets:
       PLATFORM_GITOPS_TOKEN:
-        required: true
+        required: false
+      GITOPS_APP_ID:
+        required: false
+      GITOPS_APP_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -67,12 +71,69 @@ jobs:
             printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve GitOps authentication token (GitHub App or PAT fallback)
+        id: gitops_token
+        shell: bash
+        env:
+          GITOPS_TOKEN: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          GITOPS_APP_ID: ${{ secrets.GITOPS_APP_ID }}
+          GITOPS_APP_PRIVATE_KEY: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          GITOPS_REPO: ${{ steps.descriptor.outputs.gitops_repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GITOPS_APP_ID}" ] && [ -n "${GITOPS_APP_PRIVATE_KEY}" ]; then
+            TOKEN="$(python3 - <<'PY'
+          import base64, json, os, subprocess, time, urllib.request
+          def b64url(b: bytes) -> str:
+              return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+          app_id = os.environ["GITOPS_APP_ID"].strip()
+          priv_key = os.environ["GITOPS_APP_PRIVATE_KEY"].strip()
+          owner = os.environ.get("GITOPS_REPO", "Shhinobi/k3s-gitops-prod").split("/", 1)[0]
+          now = int(time.time())
+          h = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+          p = b64url(json.dumps({"iat": now - 60, "exp": now + 300, "iss": app_id}).encode())
+          proc = subprocess.run(
+              ["bash", "-c", 'openssl dgst -sha256 -sign <(printf "%s" "$PRIV_KEY")'],
+              input=f"{h}.{p}".encode(),
+              env={"PRIV_KEY": priv_key, "PATH": "/usr/bin:/bin"},
+              capture_output=True,
+              check=True,
+          )
+          jwt_tok = f"{h}.{p}.{b64url(proc.stdout)}"
+          req = urllib.request.Request(
+              "https://api.github.com/app/installations",
+              headers={"Authorization": f"Bearer {jwt_tok}", "Accept": "application/vnd.github+json"},
+          )
+          with urllib.request.urlopen(req) as resp:
+              installs = json.loads(resp.read().decode())
+          inst_id = next(
+              (str(i["id"]) for i in installs if i.get("account", {}).get("login", "").lower() == owner.lower()),
+              str(installs[0]["id"]) if installs else "",
+          )
+          req2 = urllib.request.Request(
+              f"https://api.github.com/app/installations/{inst_id}/access_tokens",
+              method="POST",
+              headers={"Authorization": f"Bearer {jwt_tok}", "Accept": "application/vnd.github+json"},
+          )
+          with urllib.request.urlopen(req2) as resp2:
+              print(json.loads(resp2.read().decode())["token"])
+          PY
+            )"
+            echo "::add-mask::${TOKEN}"
+            echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${GITOPS_TOKEN}" ]; then
+            echo "token=${GITOPS_TOKEN}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Neither GITOPS_APP_ID/GITOPS_APP_PRIVATE_KEY nor PLATFORM_GITOPS_TOKEN is configured."
+            exit 1
+          fi
+
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           repository: ${{ steps.descriptor.outputs.gitops_repository }}
           ref: ${{ steps.target.outputs.branch }}
           fetch-depth: 0
-          token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          token: ${{ steps.gitops_token.outputs.token }}
           path: gitops
 
       - name: Restore exact image patch
@@ -118,7 +179,7 @@ jobs:
           APPLICATION: ${{ steps.descriptor.outputs.application }}
           REVISION: ${{ inputs.revision }}
         with:
-          github-token: ${{ secrets.PLATFORM_GITOPS_TOKEN }}
+          github-token: ${{ steps.gitops_token.outputs.token }}
           script: |
             const [owner, repo] = process.env.REPOSITORY.split('/');
             const head = process.env.HEAD_BRANCH;
