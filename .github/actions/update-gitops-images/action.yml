@@ -74,13 +74,35 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Check existing Python runtime
+      id: check_python
+      shell: bash
+      run: |
+        if python3 -c 'import sys, pip; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+          echo "has_python=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_python=false" >> "$GITHUB_OUTPUT"
+        fi
     - name: Set up pinned Python runtime
+      if: steps.check_python.outputs.has_python != 'true'
       uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # v5.4.0
       with:
         python-version: '3.12'
     - name: Install pinned parser dependency
       shell: bash
-      run: python3 -m pip install --disable-pip-version-check --quiet PyYAML==6.0.2 cryptography==50.0.0
+      env:
+        T14_TARGETS: ${{ inputs.t14-targets }}
+      run: |
+        pkgs=(PyYAML==6.0.2)
+        if [ -n "$T14_TARGETS" ]; then
+          pkgs+=(cryptography==50.0.0)
+          check_imports="import yaml, cryptography"
+        else
+          check_imports="import yaml"
+        fi
+        python3 -c "$check_imports" >/dev/null 2>&1 || \
+          python3 -m pip install --disable-pip-version-check --quiet --break-system-packages "${pkgs[@]}" 2>/dev/null || \
+          python3 -m pip install --disable-pip-version-check --quiet "${pkgs[@]}"
     - name: Fetch, verify, and publish the historical T14 baseline
       if: inputs.t14-targets != ''
       shell: bash
