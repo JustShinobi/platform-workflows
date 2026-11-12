@@ -569,6 +569,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('git switch -C "$branch" "origin/$branch"', release)
         self.assertIn("Production already references these digests", release)
         self.assertIn("printf 'branch=%s\\n' \"$branch\" >> \"$GITHUB_OUTPUT\"", release)
+        self.assertIn("const prefix = `promote/${app}/`;", release)
+        self.assertIn("github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' })", release)
+        self.assertIn("github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` })", release)
 
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")

@@ -1140,7 +1140,6 @@ jobs:
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
       - name: Open production pull request
-        if: steps.commit.outputs.has_changes != 'false'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REPOSITORY: ${{ needs.prepare.outputs.gitops_repository }}
@@ -1148,19 +1147,49 @@ jobs:
           BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          PROMOTION_MODE: ${{ needs.prepare.outputs.promotion_mode }}
+          HAS_CHANGES: ${{ steps.commit.outputs.has_changes }}
         with:
           github-token: ${{ steps.gitops_token.outputs.token }}
           script: |
             const [owner, repo] = process.env.REPOSITORY.split('/');
             const head = process.env.HEAD_BRANCH;
+            const app = process.env.APPLICATION;
+            const sha = process.env.SOURCE_SHA;
+            const hasChanges = process.env.HAS_CHANGES !== 'false';
             if (!head) return;
-            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
-            if (existing.data.length) return;
-            const validation = process.env.PROMOTION_MODE === 'production-only'
-              ? 'validated by the repository verification checks'
-              : 'validated in staging';
-            await github.rest.pulls.create({
-              owner, repo, head, base: process.env.BASE_BRANCH,
-              title: `chore(${process.env.APPLICATION}): promote ${process.env.SOURCE_SHA.slice(0, 12)} to production`,
-              body: `Promotes the exact image digests ${validation}.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${process.env.SOURCE_SHA}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            let currentPr = null;
+            if (hasChanges) {
+              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
+              if (existing.data.length) {
+                currentPr = existing.data[0];
+              } else {
+                const validation = process.env.PROMOTION_MODE === 'production-only'
+                  ? 'validated by the repository verification checks'
+                  : 'validated in staging';
+                const created = await github.rest.pulls.create({
+                  owner, repo, head, base: process.env.BASE_BRANCH,
+                  title: `chore(${app}): promote ${sha.slice(0, 12)} to production`,
+                  body: `Promotes the exact image digests ${validation}.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${sha}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                });
+                currentPr = created.data;
+              }
+            }
+            const prefix = `promote/${app}/`;
+            const openPrs = await github.rest.pulls.list({
+              owner, repo, base: process.env.BASE_BRANCH, state: 'open', per_page: 100,
             });
+            for (const pr of openPrs.data) {
+              const prRef = (pr.head && pr.head.ref) || '';
+              if (!prRef.startsWith(prefix) || prRef === head) continue;
+              const note = currentPr
+                ? `Superseded by #${currentPr.number} (\`${sha.slice(0, 12)}\`).`
+                : `Superseded by \`${sha.slice(0, 12)}\` (production already references the latest validated image digests).`;
+              try {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: note });
+                await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
+                await github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` });
+              } catch (err) {
+                core.warning(`Could not reconcile superseded PR #${pr.number} (${prRef}): ${err.message}`);
+              }
+            }
