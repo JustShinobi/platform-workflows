@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_security_scan:
+        description: Skip inline SBOM generation and Trivy scan
+        required: false
+        default: false
+        type: boolean
       upload_auxiliary_artifacts:
         description: Upload optional Docker build records
         required: false
@@ -167,6 +172,7 @@ jobs:
   verify:
     name: Verify trusted source
     needs: prepare
+    if: inputs.skip_verify != true
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 30
     steps:
@@ -255,6 +261,9 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: [prepare, verify]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      (needs.verify.result == 'success' || needs.verify.result == 'skipped')
     runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
     timeout-minutes: 30
     strategy:
@@ -425,6 +434,7 @@ jobs:
       # download two additional attempts before failing the job.
       - name: Generate SPDX SBOM (attempt 1)
         id: sbom_attempt_1
+        if: inputs.skip_security_scan != true
         continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
@@ -436,13 +446,13 @@ jobs:
           upload-release-assets: false
 
       - name: Wait before SPDX SBOM retry
-        if: steps.sbom_attempt_1.outcome == 'failure'
+        if: inputs.skip_security_scan != true && steps.sbom_attempt_1.outcome == 'failure'
         shell: bash
         run: sleep 15
 
       - name: Generate SPDX SBOM (attempt 2)
         id: sbom_attempt_2
-        if: steps.sbom_attempt_1.outcome == 'failure'
+        if: inputs.skip_security_scan != true && steps.sbom_attempt_1.outcome == 'failure'
         continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
@@ -454,13 +464,13 @@ jobs:
           upload-release-assets: false
 
       - name: Wait before final SPDX SBOM retry
-        if: steps.sbom_attempt_2.outcome == 'failure'
+        if: inputs.skip_security_scan != true && steps.sbom_attempt_2.outcome == 'failure'
         shell: bash
         run: sleep 30
 
       - name: Generate SPDX SBOM (attempt 3)
         id: sbom_attempt_3
-        if: steps.sbom_attempt_2.outcome == 'failure'
+        if: inputs.skip_security_scan != true && steps.sbom_attempt_2.outcome == 'failure'
         continue-on-error: true
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
@@ -472,11 +482,12 @@ jobs:
           upload-release-assets: false
 
       - name: Validate SPDX SBOM evidence
-        if: always()
+        if: always() && inputs.skip_security_scan != true
         shell: bash
         run: test -s "sbom-${{ matrix.name }}.spdx.json"
 
       - name: Scan published candidate
+        if: inputs.skip_security_scan != true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.74.0
