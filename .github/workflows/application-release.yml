@@ -52,6 +52,9 @@ on:
       T14_BASELINE_TOKEN:
         required: false
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
@@ -74,8 +77,10 @@ jobs:
       gitops_staging_path: ${{ steps.descriptor.outputs.gitops_staging_path }}
       gitops_production_path: ${{ steps.descriptor.outputs.gitops_production_path }}
       gitops_staging_application: ${{ steps.descriptor.outputs.gitops_staging_application }}
+      gitops_production_application: ${{ steps.descriptor.outputs.gitops_production_application }}
       image_promotion: ${{ steps.descriptor.outputs.gitops_image_promotion }}
       promotion_mode: ${{ steps.descriptor.outputs.gitops_promotion_mode }}
+      explicit_source_revision: ${{ inputs.source_revision != '' && 'true' || 'false' }}
       t14_enabled: ${{ steps.descriptor.outputs.t14_enabled }}
       t14_builder_key_id: ${{ steps.descriptor.outputs.t14_builder_key_id }}
       t14_builder_targets: ${{ steps.descriptor.outputs.t14_builder_targets }}
@@ -528,6 +533,7 @@ jobs:
     outputs:
       t14_application_activated: ${{ steps.t14_activation.outputs.activated }}
       t14_publication_only: ${{ steps.t14_activation.outputs.publication_only }}
+      superseded: ${{ steps.monotonic_guard.outputs.superseded }}
     steps:
       - name: Resolve GitOps authentication token (GitHub App or PAT fallback)
         id: gitops_token
@@ -592,10 +598,136 @@ jobs:
           repository: ${{ needs.prepare.outputs.gitops_repository }}
           # Enabled T14 binds stagingBranch to the trunk; other releases retain baseBranch.
           ref: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
+          fetch-depth: 0
           token: ${{ steps.gitops_token.outputs.token }}
           path: gitops
 
+      - name: Guard against out-of-order staging downgrade
+        id: monotonic_guard
+        working-directory: gitops
+        shell: bash
+        env:
+          T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
+          EXPLICIT_SOURCE_REVISION: ${{ needs.prepare.outputs.explicit_source_revision }}
+          APPLICATION: ${{ needs.prepare.outputs.application }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          SOURCE_REPO: ${{ github.repository }}
+          GITOPS_REPO: ${{ needs.prepare.outputs.gitops_repository }}
+          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          STAGING_FILE: ${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
+          GITOPS_TOKEN: ${{ steps.gitops_token.outputs.token }}
+          APP_READ_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          if [ "$T14_ENABLED" = true ] || [ "$EXPLICIT_SOURCE_REVISION" = true ]; then
+            printf 'superseded=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, re, subprocess, urllib.parse, urllib.request
+
+          app = os.environ["APPLICATION"].strip()
+          source_sha = os.environ["SOURCE_SHA"].strip()
+          source_repo = os.environ["SOURCE_REPO"].strip()
+          gitops_repo = os.environ["GITOPS_REPO"].strip()
+          base_branch = os.environ["BASE_BRANCH"].strip()
+          staging_file = os.environ["STAGING_FILE"].strip()
+          gitops_token = os.environ.get("GITOPS_TOKEN", "").strip()
+          app_token = os.environ.get("APP_READ_TOKEN", "").strip()
+          api_url = os.environ.get("API_URL", "https://api.github.com").rstrip("/")
+          gh_out = os.environ["GITHUB_OUTPUT"]
+          esc_app = re.escape(app)
+          esc_repo = re.escape(source_repo)
+
+          def extract_sha_from_commit(block: str) -> str:
+              repo_m = re.search(r"(?m)^Source-Repository:\s*(\S+)\s*$", block)
+              if repo_m and repo_m.group(1).lower() != source_repo.lower():
+                  return ""
+              rev_m = re.search(r"(?m)^Source-Revision:\s*([0-9a-f]{40})\s*$", block)
+              if rev_m and repo_m:
+                  return rev_m.group(1)
+              src_m = re.search(rf"(?mi)^Source:\s*{esc_repo}@([0-9a-f]{{40}})\s*$", block)
+              if src_m:
+                  return src_m.group(1)
+              subj_m = re.search(
+                  rf"(?m)^chore\({esc_app}\):\s*promote\s+([0-9a-f]{{7,40}})\s+to\s+(?:staging|production)\b",
+                  block,
+              )
+              return subj_m.group(1) if subj_m else ""
+
+          watermarks: list[str] = []
+          log_out = subprocess.check_output(
+              ["git", "log", "-n", "15", "--format=%B%n---COMMIT-END---", "--", staging_file],
+              text=True,
+          )
+          for block in log_out.split("---COMMIT-END---"):
+              found = extract_sha_from_commit(block)
+              if found:
+                  watermarks.append(found)
+                  break
+
+          promo_branch = f"promote/{app}/production"
+          if gitops_token and gitops_repo:
+              try:
+                  req_repo = urllib.request.Request(
+                      f"{api_url}/repos/{gitops_repo}",
+                      headers={"Authorization": f"Bearer {gitops_token}", "Accept": "application/vnd.github+json"},
+                  )
+                  with urllib.request.urlopen(req_repo, timeout=10) as resp_r:
+                      canonical_gitops = json.loads(resp_r.read().decode()).get("full_name", gitops_repo)
+              except Exception:
+                  canonical_gitops = gitops_repo
+              try:
+                  q = urllib.parse.urlencode({"state": "open", "base": base_branch, "per_page": "100"})
+                  req_prs = urllib.request.Request(
+                      f"{api_url}/repos/{canonical_gitops}/pulls?{q}",
+                      headers={"Authorization": f"Bearer {gitops_token}", "Accept": "application/vnd.github+json"},
+                  )
+                  with urllib.request.urlopen(req_prs, timeout=10) as resp_p:
+                      for pr in json.loads(resp_p.read().decode()):
+                          if ((pr.get("head") or {}).get("ref") or "") != promo_branch:
+                              continue
+                          body = pr.get("body") or ""
+                          mm = re.search(r"<!--\s*gitops-promote:\s*(\{[^\n]*?\})\s*-->", body)
+                          if mm:
+                              marker = json.loads(mm.group(1))
+                              m_sha = str(marker.get("sourceRevision", ""))
+                              if re.fullmatch(r"[0-9a-f]{40}", m_sha):
+                                  watermarks.append(m_sha)
+              except Exception as exc:
+                  print(f"Open PR watermark lookup note: {exc}")
+
+          superseded = False
+          for wm in dict.fromkeys(watermarks):
+              if not wm or wm == source_sha or source_sha.startswith(wm) or not app_token:
+                  continue
+              url = f"{api_url}/repos/{source_repo}/compare/{source_sha}...{wm}"
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": f"Bearer {app_token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      data = json.loads(resp.read().decode())
+                      if data.get("status") == "ahead":
+                          superseded = True
+                          print(
+                              f"Skipping out-of-order staging promotion: newer descendant {wm} is already promoted (ahead of {source_sha})."
+                          )
+                          break
+              except Exception as exc:
+                  print(f"Monotonic check note (continuing): {exc}")
+
+          with open(gh_out, "a", encoding="utf-8") as fh:
+              fh.write(f"superseded={'true' if superseded else 'false'}\n")
+          PY
+
       - name: Resolve immutable release evidence from registry
+        if: steps.monotonic_guard.outputs.superseded != 'true'
         shell: bash
         env:
           MATRIX: ${{ needs.prepare.outputs.matrix }}
@@ -665,7 +797,7 @@ jobs:
           PY
 
       - name: Download T14 builder proofs
-        if: needs.prepare.outputs.t14_enabled == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true'
         uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317 # v8.0.1
         with:
           pattern: t14-builder-proof-*
@@ -673,7 +805,7 @@ jobs:
           merge-multiple: true
 
       - name: Verify mounted Zot credentials for T14 baseline publication
-        if: needs.prepare.outputs.t14_enabled == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -685,6 +817,7 @@ jobs:
           printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
 
       - name: Update staging image patches
+        if: steps.monotonic_guard.outputs.superseded != 'true'
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
@@ -693,7 +826,7 @@ jobs:
           allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
 
       - name: Update T14 image patches
-        if: needs.prepare.outputs.t14_enabled == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true'
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
         with:
           images-file: gitops/${{ needs.prepare.outputs.t14_gitops_path }}/images.yaml
@@ -714,7 +847,7 @@ jobs:
           t14-baseline-token: ${{ secrets.T14_BASELINE_TOKEN }}
 
       - name: Stage T14 builder proofs with the image promotion
-        if: needs.prepare.outputs.t14_enabled == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true'
         shell: bash
         env:
           T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
@@ -729,11 +862,13 @@ jobs:
 
       - name: Commit staging promotion
         id: commit
+        if: steps.monotonic_guard.outputs.superseded != 'true'
         working-directory: gitops
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          SOURCE_REPO: ${{ github.repository }}
           TARGET_BRANCH: ${{ needs.prepare.outputs.t14_enabled == 'true' && needs.prepare.outputs.gitops_staging_branch || needs.prepare.outputs.gitops_base_branch }}
           T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
           T14_PATH: ${{ needs.prepare.outputs.t14_gitops_path }}
@@ -748,14 +883,31 @@ jobs:
           if git diff --cached --quiet; then
             echo "No staging image change required"
           else
-            git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to staging"
-            git pull --rebase origin "$TARGET_BRANCH"
-            git push origin "HEAD:$TARGET_BRANCH"
+            git commit \
+              -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to staging" \
+              -m "Source-Repository: ${SOURCE_REPO}" \
+              -m "Source-Revision: ${SOURCE_SHA}"
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase origin "$TARGET_BRANCH"
+              if git push origin "HEAD:$TARGET_BRANCH"; then
+                pushed=true
+                break
+              fi
+              echo "Concurrent staging push detected on $TARGET_BRANCH; retrying ($attempt/3)..." >&2
+              sleep 2
+            done
+            if [ "$pushed" != true ]; then
+              echo "Failed to push staging promotion to $TARGET_BRANCH after 3 attempts" >&2
+              exit 1
+            fi
           fi
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git config --local --unset-all http.https://github.com/.extraheader || true
 
       - name: Detect T14 Application activation
         id: t14_activation
+        if: steps.monotonic_guard.outputs.superseded != 'true'
         shell: bash
         env:
           T14_ENABLED: ${{ needs.prepare.outputs.t14_enabled }}
@@ -793,7 +945,7 @@ jobs:
           esac
 
       - name: Report T14 publication-only result
-        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'false'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'false'
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.t14_gitops_application }}
@@ -811,7 +963,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Wait for Argo CD staging health
-        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && (needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true')
         shell: bash
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -860,7 +1012,7 @@ jobs:
           exit 1
 
       - name: Wait for Argo CD T14 health
-        if: needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true' && steps.t14_activation.outputs.activated == 'true'
         shell: bash
         env:
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -909,7 +1061,7 @@ jobs:
           exit 1
 
       - name: Check out application for smoke test
-        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && (needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true')
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.source_revision }}
@@ -917,14 +1069,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js runtime
-        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && (needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true')
         uses: actions/setup-node@3d7870f6218881292d183093179901ae8dc2ef85 # v7.0.0
         with:
           node-version: '24'
           package-manager-cache: false
 
       - name: Run fixed staging smoke contract
-        if: needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true'
+        if: steps.monotonic_guard.outputs.superseded != 'true' && (needs.prepare.outputs.t14_enabled != 'true' || steps.t14_activation.outputs.activated == 'true')
         working-directory: application
         shell: bash
         env:
@@ -935,12 +1087,13 @@ jobs:
           scripts/ci/smoke-stg
 
   propose-production:
-    name: Open production promotion PR
+    name: Open or update production promotion PR
     needs: [prepare, build, promote-staging]
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.build.result == 'success' &&
       needs.prepare.outputs.t14_build_only != 'true' &&
+      needs.promote-staging.outputs.superseded != 'true' &&
       (
         needs.promote-staging.result == 'success' ||
         (needs.promote-staging.result == 'skipped' && needs.prepare.outputs.promotion_mode == 'production-only')
@@ -1011,6 +1164,7 @@ jobs:
         with:
           repository: ${{ needs.prepare.outputs.gitops_repository }}
           ref: ${{ needs.prepare.outputs.gitops_base_branch }}
+          fetch-depth: 0
           token: ${{ steps.gitops_token.outputs.token }}
           path: gitops
 
@@ -1083,31 +1237,85 @@ jobs:
               print(f"Resolved {name}: {image}@{digest}")
           PY
 
-      - name: Prepare production promotion branch
-        id: production
+      - name: Capture current production baseline
+        id: baseline
         working-directory: gitops
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
+          SOURCE_REPO: ${{ github.repository }}
+          PROD_FILE: ${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
+          IMAGE_PROMOTION: ${{ needs.prepare.outputs.image_promotion }}
+          BASELINE_JSON: ${{ runner.temp }}/prod-baseline.json
         run: |
           set -euo pipefail
-          branch="promote/${APPLICATION}/${SOURCE_SHA}"
-          git config user.name "platform-delivery[bot]"
-          git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
-            git switch -C "$branch" "origin/$branch"
-            echo "Reusing existing production promotion branch $branch"
-          else
-            status=$?
-            if [ "$status" -ne 2 ]; then
-              echo "Could not determine whether production promotion branch $branch exists" >&2
-              exit "$status"
-            fi
-            git switch -c "$branch"
-          fi
-          printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+
+          app = os.environ["APPLICATION"].strip()
+          source_repo = os.environ["SOURCE_REPO"].strip()
+          prod_file = Path(os.environ["PROD_FILE"])
+          mode = os.environ.get("IMAGE_PROMOTION", "kustomize-images")
+          out_file = Path(os.environ["BASELINE_JSON"])
+          esc_app = re.escape(app)
+          esc_repo = re.escape(source_repo)
+
+          prev_source_sha = ""
+          if prod_file.exists():
+              log_out = subprocess.check_output(
+                  ["git", "log", "-n", "20", "--format=%B%n---COMMIT-END---", "--", str(prod_file)],
+                  text=True,
+              )
+              for block in log_out.split("---COMMIT-END---"):
+                  repo_m = re.search(r"(?m)^Source-Repository:\s*(\S+)\s*$", block)
+                  if repo_m and repo_m.group(1).lower() != source_repo.lower():
+                      continue
+                  m = re.search(r"(?m)^Source-Revision:\s*([0-9a-f]{40})\s*$", block) if repo_m else None
+                  if not m:
+                      m = re.search(rf"(?mi)^Source:\s*{esc_repo}@([0-9a-f]{{40}})\s*$", block)
+                  if not m:
+                      m = re.search(
+                          rf"(?m)^chore\({esc_app}\):\s*promote\s+([0-9a-f]{{7,40}})\s+to\s+production\b",
+                          block,
+                      )
+                  if m:
+                      prev_source_sha = m.group(1)
+                      break
+
+          digests = {}
+          if prod_file.exists():
+              raw = prod_file.read_text(encoding="utf-8")
+              try:
+                  import yaml
+                  if mode == "chart-values":
+                      doc = yaml.safe_load(raw)
+                      if isinstance(doc, dict):
+                          for _sec, vals in doc.items():
+                              if isinstance(vals, dict) and isinstance(vals.get("fullnameOverride"), str):
+                                  img = vals.get("image")
+                                  if isinstance(img, dict) and isinstance(img.get("digest"), str):
+                                      digests[vals["fullnameOverride"]] = img["digest"]
+                  else:
+                      for doc in yaml.safe_load_all(raw):
+                          if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
+                              continue
+                          w = (doc.get("metadata") or {}).get("name")
+                          containers = (((doc.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+                          for c in containers:
+                              if isinstance(c, dict) and w and c.get("name") and isinstance(c.get("image"), str):
+                                  m_dig = re.search(r"(sha256:[0-9a-f]{64})", c["image"])
+                                  if m_dig:
+                                      digests[f"{w}/{c['name']}"] = m_dig.group(1)
+              except Exception:
+                  for m_line in re.finditer(r"name:\s*([a-z0-9-]+)\s+image:\s*\S+@(sha256:[0-9a-f]{64})", raw):
+                      digests[m_line.group(1)] = m_line.group(2)
+
+          out_file.write_text(
+              json.dumps({"prev_source_sha": prev_source_sha, "digests": digests}, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
 
       - name: Update production image patches
         uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
@@ -1117,29 +1325,250 @@ jobs:
           mode: ${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'chart-values' || 'kustomize' }}
           allow-missing-components: ${{ needs.prepare.outputs.t14_only_components || '' }}
 
-      - name: Commit production promotion
-        id: commit
+      - name: Prepare production promotion branch
+        id: production
         working-directory: gitops
         shell: bash
         env:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
-          BRANCH: ${{ steps.production.outputs.branch }}
+          SOURCE_REPO: ${{ github.repository }}
+          GITOPS_REPO: ${{ needs.prepare.outputs.gitops_repository }}
+          BASE_BRANCH: ${{ needs.prepare.outputs.gitops_base_branch }}
+          PROD_FILE: ${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
+          EXPLICIT_SOURCE_REVISION: ${{ needs.prepare.outputs.explicit_source_revision }}
+          GITOPS_TOKEN: ${{ steps.gitops_token.outputs.token }}
+          APP_READ_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
         run: |
           set -euo pipefail
+          branch="promote/${APPLICATION}/production"
+          updated_copy="$RUNNER_TEMP/updated-prod-target.yaml"
+          cp "$PROD_FILE" "$updated_copy"
+
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          git add -- "${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}"
+
+          check_superseded() {
+            local has_remote_branch="$1"
+            if [ "$EXPLICIT_SOURCE_REVISION" = true ]; then
+              return 1
+            fi
+            local ahead_sha
+            ahead_sha="$(HAS_REMOTE_BRANCH="$has_remote_branch" BRANCH_NAME="$branch" python3 - <<'PY'
+          import json, os, re, subprocess, urllib.parse, urllib.request
+
+          app = os.environ["APPLICATION"].strip()
+          source_sha = os.environ["SOURCE_SHA"].strip()
+          source_repo = os.environ["SOURCE_REPO"].strip()
+          gitops_repo = os.environ.get("GITOPS_REPO", "").strip()
+          base_branch = os.environ["BASE_BRANCH"].strip()
+          prod_file = os.environ["PROD_FILE"].strip()
+          branch_name = os.environ["BRANCH_NAME"].strip()
+          has_remote = os.environ["HAS_REMOTE_BRANCH"] == "true"
+          gitops_token = os.environ.get("GITOPS_TOKEN", "").strip()
+          app_token = os.environ.get("APP_READ_TOKEN", "").strip()
+          api_url = os.environ.get("API_URL", "https://api.github.com").rstrip("/")
+          esc_app = re.escape(app)
+          esc_repo = re.escape(source_repo)
+
+          def extract_sha(block: str) -> str:
+              repo_m = re.search(r"(?m)^Source-Repository:\s*(\S+)\s*$", block)
+              if repo_m and repo_m.group(1).lower() != source_repo.lower():
+                  return ""
+              m = re.search(r"(?m)^Source-Revision:\s*([0-9a-f]{40})\s*$", block) if repo_m else None
+              if not m:
+                  m = re.search(rf"(?mi)^Source:\s*{esc_repo}@([0-9a-f]{{40}})\s*$", block)
+              if not m:
+                  m = re.search(
+                      rf"(?m)^chore\({esc_app}\):\s*promote\s+([0-9a-f]{{7,40}})\s+to\s+production\b",
+                      block,
+                  )
+              return m.group(1) if m else ""
+
+          watermarks: list[str] = []
+
+          # Watermark 1: latest production commit on origin/<base_branch> (survives delete_branch_on_merge)
+          base_log = subprocess.check_output(
+              ["git", "log", "-n", "15", f"origin/{base_branch}", "--format=%B%n---COMMIT-END---", "--", prod_file],
+              text=True,
+          )
+          for block in base_log.split("---COMMIT-END---"):
+              found = extract_sha(block)
+              if found:
+                  watermarks.append(found)
+                  break
+
+          # Watermark 2: commit on origin/promote/<app>/production (if remote branch exists)
+          if has_remote:
+              branch_msg = subprocess.check_output(
+                  ["git", "log", "-n", "1", "--format=%B", f"origin/{branch_name}"], text=True
+              )
+              found_b = extract_sha(branch_msg)
+              if found_b:
+                  watermarks.append(found_b)
+
+          # Watermark 3: open PR body marker (prevents split-brain after unchanged_digests=true)
+          if gitops_token and gitops_repo:
+              try:
+                  req_repo = urllib.request.Request(
+                      f"{api_url}/repos/{gitops_repo}",
+                      headers={"Authorization": f"Bearer {gitops_token}", "Accept": "application/vnd.github+json"},
+                  )
+                  with urllib.request.urlopen(req_repo, timeout=10) as resp_r:
+                      canonical_gitops = json.loads(resp_r.read().decode()).get("full_name", gitops_repo)
+              except Exception:
+                  canonical_gitops = gitops_repo
+              try:
+                  q = urllib.parse.urlencode({"state": "open", "base": base_branch, "per_page": "100"})
+                  req_prs = urllib.request.Request(
+                      f"{api_url}/repos/{canonical_gitops}/pulls?{q}",
+                      headers={"Authorization": f"Bearer {gitops_token}", "Accept": "application/vnd.github+json"},
+                  )
+                  with urllib.request.urlopen(req_prs, timeout=10) as resp_p:
+                      for pr in json.loads(resp_p.read().decode()):
+                          if ((pr.get("head") or {}).get("ref") or "") != branch_name:
+                              continue
+                          body = pr.get("body") or ""
+                          mm = re.search(r"<!--\s*gitops-promote:\s*(\{[^\n]*?\})\s*-->", body)
+                          if mm:
+                              marker = json.loads(mm.group(1))
+                              m_sha = str(marker.get("sourceRevision", ""))
+                              if re.fullmatch(r"[0-9a-f]{40}", m_sha):
+                                  watermarks.append(m_sha)
+              except Exception:
+                  pass
+
+          for wm in dict.fromkeys(watermarks):
+              if not wm or wm == source_sha or source_sha.startswith(wm) or not app_token:
+                  continue
+              url = f"{api_url}/repos/{source_repo}/compare/{source_sha}...{wm}"
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": f"Bearer {app_token}",
+                      "Accept": "application/vnd.github+json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      data = json.loads(resp.read().decode())
+                      if data.get("status") == "ahead":
+                          print(wm)
+                          raise SystemExit(0)
+              except SystemExit:
+                  raise
+              except Exception:
+                  pass
+          print("")
+          PY
+            )"
+            if [ -n "$ahead_sha" ]; then
+              echo "Skipping out-of-order production promotion: newer descendant $ahead_sha is already promoted"
+              {
+                printf 'branch=%s\n' "$branch"
+                printf 'has_changes=true\n'
+                printf 'pushed=false\n'
+                printf 'unchanged_digests=false\n'
+                printf 'superseded=true\n'
+              } >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            return 1
+          }
+
+          git add -- "$PROD_FILE"
           if git diff --cached --quiet; then
             echo "Production already references these digests"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            {
+              printf 'branch=%s\n' "$branch"
+              printf 'has_changes=false\n'
+              printf 'pushed=false\n'
+              printf 'unchanged_digests=false\n'
+              printf 'superseded=false\n'
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git commit -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to production"
-          git push origin "$BRANCH"
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
-      - name: Open production pull request
+          pushed=false
+          for attempt in 1 2 3; do
+            git fetch --no-tags origin "refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+            remote_oid=""
+            has_remote_branch="false"
+            if remote_line="$(git ls-remote --exit-code --heads origin "refs/heads/$branch" 2>/dev/null)"; then
+              remote_oid="${remote_line%%[[:space:]]*}"
+              has_remote_branch="true"
+              git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            else
+              status=$?
+              if [ "$status" -ne 2 ]; then
+                echo "Could not determine whether production promotion branch $branch exists" >&2
+                exit "$status"
+              fi
+            fi
+
+            if check_superseded "$has_remote_branch"; then
+              exit 0
+            fi
+
+            if [ "$has_remote_branch" = true ]; then
+              remote_prod_copy="$RUNNER_TEMP/remote-branch-prod-target.yaml"
+              if git show "origin/$branch:$PROD_FILE" > "$remote_prod_copy" 2>/dev/null && \
+                 cmp -s "$updated_copy" "$remote_prod_copy" && \
+                 git merge-tree --write-tree "origin/$BASE_BRANCH" "origin/$branch" >/dev/null 2>&1; then
+                echo "Reusing existing production promotion branch $branch (identical image digests and cleanly mergeable)"
+                {
+                  printf 'branch=%s\n' "$branch"
+                  printf 'has_changes=true\n'
+                  printf 'pushed=false\n'
+                  printf 'unchanged_digests=true\n'
+                  printf 'superseded=false\n'
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+
+            git switch -f -C "$branch" "origin/$BASE_BRANCH"
+            cp "$updated_copy" "$PROD_FILE"
+            git add -- "$PROD_FILE"
+            if git diff --cached --quiet; then
+              echo "Production already references these digests"
+              {
+                printf 'branch=%s\n' "$branch"
+                printf 'has_changes=false\n'
+                printf 'pushed=false\n'
+                printf 'unchanged_digests=false\n'
+                printf 'superseded=false\n'
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git commit \
+              -m "chore(${APPLICATION}): promote ${SOURCE_SHA:0:12} to production" \
+              -m "Source-Repository: ${SOURCE_REPO}" \
+              -m "Source-Revision: ${SOURCE_SHA}"
+            if git push --force-with-lease="refs/heads/${branch}:${remote_oid}" origin "HEAD:refs/heads/${branch}"; then
+              pushed=true
+              break
+            fi
+            echo "Concurrent update detected on $branch; retrying ($attempt/3)..." >&2
+            sleep 2
+          done
+
+          if [ "$pushed" != true ]; then
+            echo "Failed to update rolling production promotion branch $branch after 3 attempts" >&2
+            exit 1
+          fi
+
+          {
+            printf 'branch=%s\n' "$branch"
+            printf 'has_changes=true\n'
+            printf 'pushed=true\n'
+            printf 'unchanged_digests=false\n'
+            printf 'superseded=false\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update production pull request
+        if: steps.production.outputs.superseded != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REPOSITORY: ${{ needs.prepare.outputs.gitops_repository }}
@@ -1148,48 +1577,301 @@ jobs:
           APPLICATION: ${{ needs.prepare.outputs.application }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_revision }}
           PROMOTION_MODE: ${{ needs.prepare.outputs.promotion_mode }}
-          HAS_CHANGES: ${{ steps.commit.outputs.has_changes }}
+          IMAGE_PROMOTION: ${{ needs.prepare.outputs.image_promotion }}
+          PRODUCTION_PATH: ${{ needs.prepare.outputs.gitops_production_path }}
+          PRODUCTION_APP: ${{ needs.prepare.outputs.gitops_production_application }}
+          STAGING_APP: ${{ needs.prepare.outputs.gitops_staging_application }}
+          EXPLICIT_SOURCE_REVISION: ${{ needs.prepare.outputs.explicit_source_revision }}
+          HAS_CHANGES: ${{ steps.production.outputs.has_changes }}
+          UNCHANGED_DIGESTS: ${{ steps.production.outputs.unchanged_digests }}
+          BASELINE_FILE: ${{ runner.temp }}/prod-baseline.json
+          RELEASE_DIR: release
+          APP_READ_TOKEN: ${{ github.token }}
         with:
           github-token: ${{ steps.gitops_token.outputs.token }}
           script: |
-            const [owner, repo] = process.env.REPOSITORY.split('/');
+            const fs = require('fs');
+            const path = require('path');
+
+            const [rawOwner, rawRepo] = process.env.REPOSITORY.split('/');
+            let owner = rawOwner;
+            let repo = rawRepo;
+            try {
+              const repoInfo = await github.rest.repos.get({ owner: rawOwner, repo: rawRepo });
+              owner = repoInfo.data.owner.login;
+              repo = repoInfo.data.name;
+            } catch (err) {
+              core.info(`Using configured GitOps repository coordinates ${owner}/${repo}: ${err.message}`);
+            }
+
             const head = process.env.HEAD_BRANCH;
+            const baseBranch = process.env.BASE_BRANCH;
             const app = process.env.APPLICATION;
             const sha = process.env.SOURCE_SHA;
+            const shortSha = sha.slice(0, 12);
             const hasChanges = process.env.HAS_CHANGES !== 'false';
+            const unchangedDigests = process.env.UNCHANGED_DIGESTS === 'true';
+            const promotionMode = process.env.PROMOTION_MODE || 'staging-and-production';
+            const imagePromotion = process.env.IMAGE_PROMOTION || 'kustomize-images';
+            const prodPath = process.env.PRODUCTION_PATH || '';
+            const prodApp = process.env.PRODUCTION_APP || `prd-${app}`;
+            const stgApp = process.env.STAGING_APP || `stg-${app}`;
             if (!head) return;
-            let currentPr = null;
-            if (hasChanges) {
-              const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
-              if (existing.data.length) {
-                currentPr = existing.data[0];
-              } else {
-                const validation = process.env.PROMOTION_MODE === 'production-only'
-                  ? 'validated by the repository verification checks'
-                  : 'validated in staging';
-                const created = await github.rest.pulls.create({
-                  owner, repo, head, base: process.env.BASE_BRANCH,
-                  title: `chore(${app}): promote ${sha.slice(0, 12)} to production`,
-                  body: `Promotes the exact image digests ${validation}.\n\nSource: ${context.repo.owner}/${context.repo.repo}@${sha}\nWorkflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-                });
-                currentPr = created.data;
+
+            const srcRepoFull = `${context.repo.owner}/${context.repo.repo}`;
+            const serverUrl = context.serverUrl || 'https://github.com';
+            const apiUrl = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/$/, '');
+
+            let baseline = { prev_source_sha: '', digests: {} };
+            try {
+              if (process.env.BASELINE_FILE && fs.existsSync(process.env.BASELINE_FILE)) {
+                baseline = JSON.parse(fs.readFileSync(process.env.BASELINE_FILE, 'utf8'));
+              }
+            } catch (err) {
+              core.warning(`Could not parse production baseline metadata: ${err.message}`);
+            }
+
+            const releaseRecords = [];
+            try {
+              const relDir = process.env.RELEASE_DIR || 'release';
+              if (fs.existsSync(relDir)) {
+                for (const entry of fs.readdirSync(relDir).sort()) {
+                  if (!entry.endsWith('.json') || entry.endsWith('.spdx.json')) continue;
+                  releaseRecords.push(JSON.parse(fs.readFileSync(path.join(relDir, entry), 'utf8')));
+                }
+              }
+            } catch (err) {
+              core.warning(`Could not read release fragments: ${err.message}`);
+            }
+
+            let resolvedPrevSha = baseline.prev_source_sha || '';
+            let commitLines = [];
+            let totalCommits = 0;
+            const appToken = process.env.APP_READ_TOKEN || '';
+            if (resolvedPrevSha && resolvedPrevSha !== sha && !sha.startsWith(resolvedPrevSha) && appToken) {
+              try {
+                const resp = await fetch(
+                  `${apiUrl}/repos/${srcRepoFull}/compare/${encodeURIComponent(resolvedPrevSha)}...${encodeURIComponent(sha)}`,
+                  {
+                    headers: {
+                      Authorization: `Bearer ${appToken}`,
+                      Accept: 'application/vnd.github+json',
+                    },
+                  }
+                );
+                if (resp.ok) {
+                  const cmp = await resp.json();
+                  if (cmp.base_commit && cmp.base_commit.sha) {
+                    resolvedPrevSha = cmp.base_commit.sha;
+                  }
+                  const commits = Array.isArray(cmp.commits) ? cmp.commits : [];
+                  totalCommits = typeof cmp.total_commits === 'number' ? cmp.total_commits : commits.length;
+                  const recent = commits.slice(-15).reverse();
+                  commitLines = recent.map((c) => {
+                    const cShort = String(c.sha || '').slice(0, 7);
+                    const rawHeadline = String((c.commit && c.commit.message) || '').split(/\r?\n/, 1)[0];
+                    const safeHeadline = rawHeadline
+                      .replace(/[`<>]/g, '')
+                      .replace(/\|/g, '\\|')
+                      .trim()
+                      .slice(0, 120);
+                    return `- [\`${cShort}\`](${serverUrl}/${srcRepoFull}/commit/${c.sha})${safeHeadline ? ` \`${safeHeadline}\`` : ''}`;
+                  });
+                }
+              } catch (err) {
+                core.info(`Could not fetch commit range for PR body: ${err.message}`);
               }
             }
-            const prefix = `promote/${app}/`;
-            const openPrs = await github.rest.pulls.list({
-              owner, repo, base: process.env.BASE_BRANCH, state: 'open', per_page: 100,
+
+            const escapeCell = (val) => String(val || '').replace(/\|/g, '\\|');
+            const shortDigest = (d) => (d && d.startsWith('sha256:') ? `\`sha256:${d.slice(7, 19)}…\`` : '—');
+
+            const buildPrBody = () => {
+              const validationSummary = promotionMode === 'production-only'
+                ? 'validated by the repository CI verification contract (`production-only`)'
+                : `validated in staging (\`${stgApp}\` Synced & Healthy + \`smoke-stg\` passed)`;
+
+              const prodRevCell = resolvedPrevSha
+                ? `[\`${srcRepoFull}@${resolvedPrevSha.slice(0, 12)}\`](${serverUrl}/${srcRepoFull}/commit/${resolvedPrevSha}) ([compare](${serverUrl}/${srcRepoFull}/compare/${resolvedPrevSha}...${sha}))`
+                : '_Not recorded on previous manifest commit_';
+
+              const lines = [
+                `<!-- gitops-promote: ${JSON.stringify({ application: app, sourceRepo: srcRepoFull, sourceRevision: sha })} -->`,
+                `## 🚀 Production Promotion — \`${app}\``,
+                '',
+                `Promotes the exact immutable OCI image digests ${validationSummary} to **\`${prodApp}\`** (\`${prodPath}\`).`,
+                `> 🔄 _Rolling promotion PR on \`${head}\` — automatically updated in-place as new revisions are validated._`,
+              ];
+
+              if (unchangedDigests) {
+                lines.push(
+                  `> ℹ️ _Runtime container digests are identical to the existing candidate on \`${head}\`; Git branch \`HEAD\` was preserved to retain green CI checks and review state._`
+                );
+              }
+
+              lines.push(
+                '',
+                '| Metadata | Value |',
+                '| :--- | :--- |',
+                `| **Candidate Revision** | [\`${srcRepoFull}@${shortSha}\`](${serverUrl}/${srcRepoFull}/commit/${sha}) |`,
+                `| **Current Production** | ${prodRevCell} |`,
+                `| **Validation Gate** | \`${promotionMode}\` |`,
+                `| **Release Pipeline** | [Run #${context.runId}](${serverUrl}/${srcRepoFull}/actions/runs/${context.runId}) |`
+              );
+
+              if (releaseRecords.length > 0) {
+                lines.push(
+                  '',
+                  '### 📦 Component Image Digests',
+                  '',
+                  '| Component | Target | Previous Prod Digest | Candidate Digest | Status |',
+                  '| :--- | :--- | :--- | :--- | :---: |'
+                );
+                for (const rec of releaseRecords) {
+                  const key = imagePromotion === 'chart-values'
+                    ? rec.workload
+                    : `${rec.workload}/${rec.container}`;
+                  const prevDig = (baseline.digests && baseline.digests[key]) || '';
+                  const changed = !prevDig || prevDig !== rec.digest;
+                  const statusBadge = changed ? '🔄 Updated' : '➖ Unchanged';
+                  lines.push(
+                    `| \`${escapeCell(rec.component)}\` | \`${escapeCell(key)}\` | ${shortDigest(prevDig)} | ${shortDigest(rec.digest)} | ${statusBadge} |`
+                  );
+                }
+              }
+
+              if (commitLines.length > 0) {
+                lines.push(
+                  '',
+                  `### 📝 Commits Since Current Production (${totalCommits})`,
+                  '',
+                  ...commitLines
+                );
+                if (totalCommits > commitLines.length && resolvedPrevSha) {
+                  lines.push(
+                    `- _…and ${totalCommits - commitLines.length} earlier commit(s) — [view full diff](${serverUrl}/${srcRepoFull}/compare/${resolvedPrevSha}...${sha})_`
+                  );
+                }
+              }
+
+              lines.push(
+                '',
+                '---',
+                `Source: ${srcRepoFull}@${sha}`,
+                `Workflow: ${serverUrl}/${srcRepoFull}/actions/runs/${context.runId}`,
+                `Source-Repository: ${srcRepoFull}`,
+                `Source-Revision: ${sha}`
+              );
+              return lines.join('\n');
+            };
+
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              base: baseBranch,
+              state: 'open',
+              per_page: 100,
             });
-            for (const pr of openPrs.data) {
+
+            const targetRepoFull = `${owner}/${repo}`.toLowerCase();
+            const isSameRepoPr = (pr) => {
+              const hr = pr.head && pr.head.repo && pr.head.repo.full_name;
+              return !hr || hr.toLowerCase() === targetRepoFull;
+            };
+
+            let currentPr = null;
+            if (hasChanges) {
+              const title = `chore(${app}): promote ${shortSha} to production`;
+              const body = buildPrBody();
+              const existingCanonical = openPrs.find((pr) => isSameRepoPr(pr) && pr.head && pr.head.ref === head);
+              if (existingCanonical) {
+                let prAlreadyAhead = false;
+                if (process.env.EXPLICIT_SOURCE_REVISION !== 'true' && appToken && existingCanonical.body) {
+                  const markerMatch = existingCanonical.body.match(/<!--\s*gitops-promote:\s*(\{[^\n]*?\})\s*-->/);
+                  if (markerMatch) {
+                    try {
+                      const marker = JSON.parse(markerMatch[1]);
+                      const prevPrSha = String(marker.sourceRevision || '');
+                      if (/^[0-9a-f]{40}$/.test(prevPrSha) && prevPrSha !== sha) {
+                        const chk = await fetch(
+                          `${apiUrl}/repos/${srcRepoFull}/compare/${encodeURIComponent(sha)}...${encodeURIComponent(prevPrSha)}`,
+                          { headers: { Authorization: `Bearer ${appToken}`, Accept: 'application/vnd.github+json' } }
+                        );
+                        if (chk.ok) {
+                          const chkData = await chk.json();
+                          if (chkData.status === 'ahead') {
+                            prAlreadyAhead = true;
+                          }
+                        }
+                      }
+                    } catch (_err) {}
+                  }
+                }
+                if (prAlreadyAhead) {
+                  currentPr = existingCanonical;
+                  core.info(`Skipping PR metadata downgrade on #${currentPr.number}: PR already tracks newer descendant revision.`);
+                } else if (existingCanonical.title !== title || (existingCanonical.body || '') !== body) {
+                  const updated = await github.rest.pulls.update({
+                    owner,
+                    repo,
+                    pull_number: existingCanonical.number,
+                    title,
+                    body,
+                  });
+                  currentPr = updated.data;
+                  core.info(`Updated existing rolling promotion PR #${currentPr.number} (${head}) to ${shortSha}.`);
+                } else {
+                  currentPr = existingCanonical;
+                  core.info(`Existing rolling promotion PR #${currentPr.number} (${head}) is already up to date.`);
+                }
+              } else {
+                const created = await github.rest.pulls.create({
+                  owner,
+                  repo,
+                  head,
+                  base: baseBranch,
+                  title,
+                  body,
+                });
+                currentPr = created.data;
+                core.info(`Created rolling promotion PR #${currentPr.number} (${head}) for ${shortSha}.`);
+              }
+            }
+
+            const prefix = `promote/${app}/`;
+            for (const pr of openPrs) {
+              if (!isSameRepoPr(pr)) continue;
               const prRef = (pr.head && pr.head.ref) || '';
-              if (!prRef.startsWith(prefix) || prRef === head) continue;
+              if (!prRef.startsWith(prefix)) continue;
+              if (hasChanges && currentPr && pr.number === currentPr.number) continue;
               const note = currentPr
-                ? `Superseded by #${currentPr.number} (\`${sha.slice(0, 12)}\`).`
-                : `Superseded by \`${sha.slice(0, 12)}\` (production already references the latest validated image digests).`;
+                ? `Superseded by rolling promotion PR #${currentPr.number} (\`${shortSha}\`).`
+                : `Closing automatically: \`${baseBranch}\` already references the latest validated image digests (\`${shortSha}\`).`;
               try {
                 await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: note });
                 await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
-                await github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` });
               } catch (err) {
-                core.warning(`Could not reconcile superseded PR #${pr.number} (${prRef}): ${err.message}`);
+                core.warning(`Could not close superseded PR #${pr.number} (${prRef}): ${err.message}`);
               }
+            }
+
+            try {
+              const refs = await github.paginate(github.rest.git.listMatchingRefs, {
+                owner,
+                repo,
+                ref: `heads/${prefix}`,
+              });
+              const keepRef = hasChanges && currentPr ? `refs/heads/${head}` : '';
+              for (const r of refs) {
+                if (!r.ref || !r.ref.startsWith(`refs/heads/${prefix}`)) continue;
+                if (r.ref === keepRef) continue;
+                const prRef = r.ref.replace(/^refs\/heads\//, '');
+                try {
+                  await github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` });
+                } catch (err) {
+                  core.warning(`Could not delete stale branch ${prRef}: ${err.message}`);
+                }
+              }
+            } catch (err) {
+              core.warning(`Could not enumerate stale ${prefix}* branches: ${err.message}`);
             }

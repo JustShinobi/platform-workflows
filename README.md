@@ -34,7 +34,7 @@ flowchart TD
     end
 
     subgraph ProdStage ["🚀 3. Promoção para Produção"]
-        Smoke --> ProdPR["📋 Abre automaticamente PR de Produção no GitOps<br/>(com os mesmos digests imutáveis)"]
+        Smoke --> ProdPR["📋 Abre ou atualiza in-place o PR único de Produção<br/>(branch rolling promote/&lt;app&gt;/production)"]
         ProdPR --> HumanReview["👀 Revisão Humana e Aprovação de PR"]
         HumanReview --> ProdMerge["✅ Merge do PR de Produção"]
         ProdMerge --> ArgoProd["☸️ Argo CD reconcilia em k3s-prod<br/>Canal deploy/prod (Fast-Forward)"]
@@ -47,7 +47,7 @@ flowchart TD
 
 | Workflow | Ponto de Entrada / Tipo | Descrição e Finalidade |
 | :--- | :--- | :--- |
-| [`application-release.yml`](.github/workflows/application-release.yml) | `workflow_call` (Push) | **Motor Principal:** Build paralelo multi-componente, SBOM, Trivy, Zot push por digest imutável, promoção para Staging, validação de health no Argo CD, smoke tests e abertura automática de PR de Produção. |
+| [`application-release.yml`](.github/workflows/application-release.yml) | `workflow_call` (Push) | **Motor Principal:** Build paralelo multi-componente, SBOM, Trivy, Zot push por digest imutável, promoção monotônica para Staging, validação de health no Argo CD, smoke tests e abertura/atualização in-place do PR único de Produção (`promote/<app>/production`). |
 | [`verify.yml`](.github/workflows/verify.yml) | `workflow_call` (PR) | **Verificação de PRs:** Execução hermética e isolada do contrato `scripts/ci/verify` em runners efêmeros ARC (`arc-k3s`). |
 | [`rollback.yml`](.github/workflows/rollback.yml) | `workflow_dispatch` | **Rollback Seguro:** Rollback controlado de versão no GitOps para Staging ou Produção com auditoria completa e lock de concorrência. |
 | [`sync-secrets-infisical.yml`](.github/workflows/sync-secrets-infisical.yml) | `workflow_dispatch` / `call` | **Sincronização de Segredos:** Sincronização automatizada de variáveis e segredos a partir do Infisical (`infisical.lan.kyo.ninja`). |

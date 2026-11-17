@@ -38,6 +38,8 @@ jobs:
     environment: ${{ inputs.environment == 'prod' && 'production-rollback' || 'staging-rollback' }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate delivery contract
         id: descriptor
@@ -63,12 +65,21 @@ jobs:
           BASE_BRANCH: ${{ steps.descriptor.outputs.gitops_base_branch }}
           STAGING_PATH: ${{ steps.descriptor.outputs.gitops_staging_path }}
           PRODUCTION_PATH: ${{ steps.descriptor.outputs.gitops_production_path }}
+          IMAGE_PROMOTION: ${{ steps.descriptor.outputs.gitops_image_promotion }}
         run: |
           set -euo pipefail
           if [[ "$TARGET_ENVIRONMENT" == stg ]]; then
-            printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$STAGING_PATH" >> "$GITHUB_OUTPUT"
+            file_name="images.yaml"
+            if [[ "$IMAGE_PROMOTION" == "chart-values" ]]; then
+              file_name="values-stg.yaml"
+            fi
+            printf 'branch=%s\npath=%s\nfile=%s\n' "$BASE_BRANCH" "$STAGING_PATH" "$file_name" >> "$GITHUB_OUTPUT"
           else
-            printf 'branch=%s\npath=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" >> "$GITHUB_OUTPUT"
+            file_name="images.yaml"
+            if [[ "$IMAGE_PROMOTION" == "chart-values" ]]; then
+              file_name="values-prd.yaml"
+            fi
+            printf 'branch=%s\npath=%s\nfile=%s\n' "$BASE_BRANCH" "$PRODUCTION_PATH" "$file_name" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Resolve GitOps authentication token (GitHub App or PAT fallback)
@@ -143,33 +154,66 @@ jobs:
         env:
           REVISION: ${{ inputs.revision }}
           TARGET_PATH: ${{ steps.target.outputs.path }}
+          TARGET_FILE: ${{ steps.target.outputs.file }}
           TARGET_ENVIRONMENT: ${{ inputs.environment }}
           APPLICATION: ${{ steps.descriptor.outputs.application }}
           BASE_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
           set -euo pipefail
+          rel_file="${TARGET_PATH}/${TARGET_FILE}"
           git cat-file -e "${REVISION}^{commit}"
-          git cat-file -e "${REVISION}:${TARGET_PATH}/images.yaml"
+          git cat-file -e "${REVISION}:${rel_file}"
           git config user.name "platform-delivery[bot]"
           git config user.email "platform-delivery[bot]@users.noreply.github.com"
-          git checkout "$REVISION" -- "$TARGET_PATH/images.yaml"
+          git checkout "$REVISION" -- "$rel_file"
           git diff --check
           if git diff --cached --quiet; then
             echo "Requested revision is already active"
+            printf 'has_changes=false\nbranch=rollback/%s/production\n' "$APPLICATION" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git commit -m "revert(${APPLICATION}): restore ${TARGET_ENVIRONMENT} images from ${REVISION:0:12}"
           if [[ "$TARGET_ENVIRONMENT" == stg ]]; then
-            git pull --rebase origin "$BASE_BRANCH"
-            git push origin "HEAD:$BASE_BRANCH"
+            git commit -m "revert(${APPLICATION}): restore ${TARGET_ENVIRONMENT} images from ${REVISION:0:12}"
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase origin "$BASE_BRANCH"
+              if git push origin "HEAD:$BASE_BRANCH"; then
+                pushed=true
+                break
+              fi
+              sleep 2
+            done
+            [[ "$pushed" == true ]]
+            printf 'has_changes=true\nbranch=\n' >> "$GITHUB_OUTPUT"
           else
-            branch="rollback/${APPLICATION}/${REVISION}"
-            git switch -c "$branch"
-            git push origin "$branch"
-            printf 'branch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+            branch="rollback/${APPLICATION}/production"
+            restored_copy="$RUNNER_TEMP/restored-prod-target.yaml"
+            cp "$rel_file" "$restored_copy"
+            pushed=false
+            for attempt in 1 2 3; do
+              git fetch --no-tags origin "refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+              remote_line="$(git ls-remote --heads origin "refs/heads/$branch" || true)"
+              remote_oid="${remote_line%%[[:space:]]*}"
+              git switch -f -C "$branch" "origin/$BASE_BRANCH"
+              cp "$restored_copy" "$rel_file"
+              git add -- "$rel_file"
+              if git diff --cached --quiet; then
+                echo "Requested revision is already active"
+                printf 'has_changes=false\nbranch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              git commit -m "revert(${APPLICATION}): restore ${TARGET_ENVIRONMENT} images from ${REVISION:0:12}"
+              if git push --force-with-lease="refs/heads/${branch}:${remote_oid}" origin "HEAD:refs/heads/${branch}"; then
+                pushed=true
+                break
+              fi
+              sleep 2
+            done
+            [[ "$pushed" == true ]]
+            printf 'has_changes=true\nbranch=%s\n' "$branch" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Open production rollback pull request
+      - name: Open or update production rollback pull request
         if: inputs.environment == 'prod' && steps.restore.outputs.branch != ''
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -178,15 +222,99 @@ jobs:
           BASE_BRANCH: ${{ steps.descriptor.outputs.gitops_base_branch }}
           APPLICATION: ${{ steps.descriptor.outputs.application }}
           REVISION: ${{ inputs.revision }}
+          HAS_CHANGES: ${{ steps.restore.outputs.has_changes }}
         with:
           github-token: ${{ steps.gitops_token.outputs.token }}
           script: |
-            const [owner, repo] = process.env.REPOSITORY.split('/');
+            const [rawOwner, rawRepo] = process.env.REPOSITORY.split('/');
+            let owner = rawOwner;
+            let repo = rawRepo;
+            try {
+              const repoInfo = await github.rest.repos.get({ owner: rawOwner, repo: rawRepo });
+              owner = repoInfo.data.owner.login;
+              repo = repoInfo.data.name;
+            } catch (_err) {}
+
             const head = process.env.HEAD_BRANCH;
-            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
-            if (existing.data.length) return;
-            await github.rest.pulls.create({
-              owner, repo, head, base: process.env.BASE_BRANCH,
-              title: `revert(${process.env.APPLICATION}): restore production images`,
-              body: `Restores production image references from GitOps revision ${process.env.REVISION}.`,
+            const baseBranch = process.env.BASE_BRANCH;
+            const app = process.env.APPLICATION;
+            const rev = process.env.REVISION;
+            const shortRev = rev.slice(0, 12);
+            const hasChanges = process.env.HAS_CHANGES !== 'false';
+
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              base: baseBranch,
+              state: 'open',
+              per_page: 100,
             });
+
+            const targetRepoFull = `${owner}/${repo}`.toLowerCase();
+            const isSameRepoPr = (pr) => {
+              const hr = pr.head && pr.head.repo && pr.head.repo.full_name;
+              return !hr || hr.toLowerCase() === targetRepoFull;
+            };
+
+            let currentPr = null;
+            if (hasChanges) {
+              const title = `revert(${app}): restore production images from ${shortRev}`;
+              const body = [
+                `## ⏪ Production Rollback — \`${app}\``,
+                '',
+                `Restores production image references from GitOps revision [\`${shortRev}\`](${context.serverUrl}/${owner}/${repo}/commit/${rev}).`,
+                `> 🔄 _Rolling rollback PR on \`${head}\` — updated in-place if re-dispatched._`,
+              ].join('\n');
+              const existingCanonical = openPrs.find((pr) => isSameRepoPr(pr) && pr.head && pr.head.ref === head);
+              if (existingCanonical) {
+                const updated = await github.rest.pulls.update({
+                  owner,
+                  repo,
+                  pull_number: existingCanonical.number,
+                  title,
+                  body,
+                });
+                currentPr = updated.data;
+              } else {
+                const created = await github.rest.pulls.create({
+                  owner,
+                  repo,
+                  head,
+                  base: baseBranch,
+                  title,
+                  body,
+                });
+                currentPr = created.data;
+              }
+            }
+
+            const prefix = `rollback/${app}/`;
+            for (const pr of openPrs) {
+              if (!isSameRepoPr(pr)) continue;
+              const prRef = (pr.head && pr.head.ref) || '';
+              if (!prRef.startsWith(prefix)) continue;
+              if (hasChanges && currentPr && pr.number === currentPr.number) continue;
+              const note = currentPr
+                ? `Superseded by rollback PR #${currentPr.number} (\`${shortRev}\`).`
+                : `Closing automatically: \`${baseBranch}\` already matches GitOps revision \`${shortRev}\`.`;
+              try {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body: note });
+                await github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' });
+              } catch (err) {
+                core.warning(`Could not close superseded rollback PR #${pr.number}: ${err.message}`);
+              }
+            }
+
+            try {
+              const refs = await github.paginate(github.rest.git.listMatchingRefs, {
+                owner,
+                repo,
+                ref: `heads/${prefix}`,
+              });
+              const keepRef = hasChanges && currentPr ? `refs/heads/${head}` : '';
+              for (const r of refs) {
+                if (!r.ref || !r.ref.startsWith(`refs/heads/${prefix}`) || r.ref === keepRef) continue;
+                const refName = r.ref.replace(/^refs\/heads\//, '');
+                await github.rest.git.deleteRef({ owner, repo, ref: `heads/${refName}` }).catch(() => {});
+              }
+            } catch (_err) {}

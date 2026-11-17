@@ -562,16 +562,599 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(release.count("upload-release-assets: false"), 3)
         self.assertIn("Validate SPDX SBOM evidence", release)
 
-    def test_production_promotion_reuses_an_existing_branch(self) -> None:
-        release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        self.assertIn("Prepare production promotion branch", release)
-        self.assertIn('git ls-remote --exit-code --heads origin "$branch"', release)
-        self.assertIn('git switch -C "$branch" "origin/$branch"', release)
-        self.assertIn("Production already references these digests", release)
-        self.assertIn("printf 'branch=%s\\n' \"$branch\" >> \"$GITHUB_OUTPUT\"", release)
-        self.assertIn("const prefix = `promote/${app}/`;", release)
-        self.assertIn("github.rest.pulls.update({ owner, repo, pull_number: pr.number, state: 'closed' })", release)
-        self.assertIn("github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` })", release)
+    def test_production_promotion_reuses_rolling_branch_and_updates_pr_in_place(self) -> None:
+        import http.server
+        import threading
+        import yaml
+
+        release_text = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
+        self.assertIn("Prepare production promotion branch", release_text)
+        self.assertIn('branch="promote/${APPLICATION}/production"', release_text)
+        self.assertIn('--force-with-lease="refs/heads/${branch}:${remote_oid}"', release_text)
+        self.assertIn("Production already references these digests", release_text)
+        self.assertIn("printf 'branch=%s\\n' \"$branch\"", release_text)
+        self.assertIn("const prefix = `promote/${app}/`;", release_text)
+        self.assertIn("github.rest.pulls.update", release_text)
+        self.assertIn("github.rest.git.deleteRef({ owner, repo, ref: `heads/${prRef}` })", release_text)
+
+        workflow = yaml.safe_load(release_text)
+        prod_steps = workflow["jobs"]["propose-production"]["steps"]
+        baseline_step = next(s for s in prod_steps if s.get("name") == "Capture current production baseline")
+        branch_step = next(s for s in prod_steps if s.get("name") == "Prepare production promotion branch")
+        pr_step = next(s for s in prod_steps if s.get("name") == "Create or update production pull request")
+        stg_guard_step = next(
+            s
+            for s in workflow["jobs"]["promote-staging"]["steps"]
+            if s.get("name") == "Guard against out-of-order staging downgrade"
+        )
+
+        sha0 = "0" * 40
+        sha1 = "1" * 40
+        sha2 = "2" * 40
+        sha2_5 = "d" * 40
+        sha3 = "3" * 40
+        commit_order = [sha0, sha1, sha2, sha2_5, sha3]
+        state_holder: dict[str, Path] = {}
+
+        class CompareHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+            def do_GET(self) -> None:  # noqa: N802
+                if re.fullmatch(r"/repos/[^/]+/k3s-gitops-prod", self.path):
+                    body = json.dumps({"full_name": "Shhinobi/k3s-gitops-prod"}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path.startswith("/repos/Shhinobi/k3s-gitops-prod/pulls") or self.path.startswith(
+                    "/repos/JustShinobi/k3s-gitops-prod/pulls"
+                ):
+                    st_file = state_holder.get("path")
+                    prs = []
+                    if st_file and st_file.exists():
+                        st = json.loads(st_file.read_text(encoding="utf-8"))
+                        prs = [p for p in st.get("prs", []) if p.get("state") == "open"]
+                    body = json.dumps(prs).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                m = re.search(r"/repos/[^/]+/[^/]+/compare/([^.]+)\.\.\.(.+)$", self.path)
+                if not m:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                base_ref, head_ref = m.group(1), m.group(2)
+                base_full = next((c for c in commit_order if c.startswith(base_ref)), None)
+                head_full = next((c for c in commit_order if c.startswith(head_ref)), None)
+                if base_full is None or head_full is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                b_idx = commit_order.index(base_full)
+                h_idx = commit_order.index(head_full)
+                if h_idx > b_idx:
+                    status = "ahead"
+                    commits = [
+                        {"sha": c, "commit": {"message": f"feat(runa): commit {i}\n\nbody"}}
+                        for i, c in enumerate(commit_order[b_idx + 1 : h_idx + 1], start=b_idx + 1)
+                    ]
+                elif h_idx == b_idx:
+                    status = "identical"
+                    commits = []
+                else:
+                    status = "behind"
+                    commits = []
+                payload = json.dumps(
+                    {
+                        "status": status,
+                        "base_commit": {"sha": base_full},
+                        "total_commits": len(commits),
+                        "commits": commits,
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CompareHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        api_url = f"http://127.0.0.1:{server.server_port}"
+
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                origin = root / "origin.git"
+                seed = root / "seed"
+                runner_temp = root / "runner_temp"
+                runner_temp.mkdir()
+                subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(origin)], check=True)
+                subprocess.run(["git", "clone", "--quiet", str(origin), str(seed)], check=True)
+                subprocess.run(["git", "config", "user.name", "Test"], cwd=seed, check=True)
+                subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=seed, check=True)
+
+                prod_rel = "clusters/prod/workloads/runa-prd/images.yaml"
+                stg_rel = "clusters/prod/workloads/runa-stg/images.yaml"
+                (seed / prod_rel).parent.mkdir(parents=True)
+                (seed / stg_rel).parent.mkdir(parents=True)
+
+                def render_img(char: str) -> str:
+                    return (
+                        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n"
+                        "spec:\n  template:\n    spec:\n      containers:\n"
+                        f"      - name: api\n        image: registry.lan.kyo.ninja/runa/api@sha256:{char * 64}\n"
+                    )
+
+                (seed / prod_rel).write_text(render_img("0"), encoding="utf-8")
+                (seed / stg_rel).write_text(render_img("2"), encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=seed, check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        f"chore(runa): promote {sha0[:12]} to production",
+                        "-m",
+                        f"Source-Revision: {sha2}",
+                    ],
+                    cwd=seed,
+                    check=False,
+                )
+                # Separate staging commit so staging tracks sha2 while prod tracks sha0
+                (seed / prod_rel).write_text(render_img("0"), encoding="utf-8")
+                subprocess.run(["git", "commit", "--amend", "--quiet", "-m", f"chore(runa): promote {sha0[:12]} to production"], cwd=seed, check=True)
+                (seed / stg_rel).write_text(render_img("a"), encoding="utf-8")
+                subprocess.run(["git", "add", stg_rel], cwd=seed, check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        f"chore(runa): promote {sha2[:12]} to staging",
+                        "-m",
+                        "Source-Repository: Shhinobi/Runa",
+                        "-m",
+                        f"Source-Revision: {sha2}",
+                    ],
+                    cwd=seed,
+                    check=True,
+                )
+                subprocess.run(["git", "push", "--quiet", "origin", "main"], cwd=seed, check=True)
+
+                # Create legacy superseded branch + orphaned branch on origin
+                for legacy_ref in (f"promote/runa/{sha0}", "promote/runa/orphaned-closed"):
+                    subprocess.run(["git", "checkout", "--quiet", "-b", legacy_ref, "origin/main"], cwd=seed, check=True)
+                    (seed / prod_rel).write_text(render_img("9"), encoding="utf-8")
+                    subprocess.run(["git", "commit", "-am", "legacy", "--quiet"], cwd=seed, check=True)
+                    subprocess.run(["git", "push", "--quiet", "origin", legacy_ref], cwd=seed, check=True)
+                subprocess.run(["git", "checkout", "--quiet", "main"], cwd=seed, check=True)
+
+                # Verify staging monotonic guard blocks older sha1, but allows explicit override
+                stg_out = root / "stg_out"
+                stg_env = os.environ.copy()
+                stg_env.update(
+                    {
+                        "T14_ENABLED": "false",
+                        "EXPLICIT_SOURCE_REVISION": "false",
+                        "APPLICATION": "runa",
+                        "SOURCE_SHA": sha1,
+                        "SOURCE_REPO": "Shhinobi/Runa",
+                        "GITOPS_REPO": "Shhinobi/k3s-gitops-prod",
+                        "BASE_BRANCH": "main",
+                        "STAGING_FILE": stg_rel,
+                        "GITOPS_TOKEN": "gtok",
+                        "APP_READ_TOKEN": "tok",
+                        "API_URL": api_url,
+                        "GITHUB_OUTPUT": str(stg_out),
+                    }
+                )
+                res = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", stg_guard_step["run"]],
+                    cwd=seed,
+                    env=stg_env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("Skipping out-of-order staging promotion", res.stdout)
+                self.assertEqual(stg_out.read_text(encoding="utf-8").strip(), "superseded=true")
+
+                stg_out.unlink()
+                stg_env["EXPLICIT_SOURCE_REVISION"] = "true"
+                subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", stg_guard_step["run"]],
+                    cwd=seed,
+                    env=stg_env,
+                    check=True,
+                )
+                self.assertEqual(stg_out.read_text(encoding="utf-8").strip(), "superseded=false")
+
+                mock_state_path = root / "gh_state.json"
+                state_holder["path"] = mock_state_path
+                mock_state_path.write_text(
+                    json.dumps(
+                        {
+                            "next_pr": 132,
+                            "create_calls": 0,
+                            "update_calls": 0,
+                            "comments": [],
+                            "prs": [
+                                {
+                                    "number": 118,
+                                    "state": "open",
+                                    "title": f"chore(runa): promote {sha0[:12]} to production",
+                                    "body": "legacy",
+                                    "head": {"ref": f"promote/runa/{sha0}"},
+                                    "base": {"ref": "main"},
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                def run_pr_cycle(source_sha: str, digest_char: str) -> dict[str, str]:
+                    work = root / f"work-{source_sha[:6]}-{digest_char}-{os.urandom(2).hex()}"
+                    subprocess.run(["git", "clone", "--quiet", str(origin), str(work / "gitops")], check=True)
+                    rel_dir = work / "release"
+                    rel_dir.mkdir()
+                    (rel_dir / "release-api.json").write_text(
+                        json.dumps(
+                            {
+                                "component": "api",
+                                "image": "registry.lan.kyo.ninja/runa/api",
+                                "digest": f"sha256:{digest_char * 64}",
+                                "workload": "api",
+                                "container": "api",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    baseline_json = runner_temp / "prod-baseline.json"
+                    base_env = os.environ.copy()
+                    base_env.update(
+                        {
+                            "APPLICATION": "runa",
+                            "SOURCE_REPO": "Shhinobi/Runa",
+                            "PROD_FILE": prod_rel,
+                            "IMAGE_PROMOTION": "kustomize-images",
+                            "BASELINE_JSON": str(baseline_json),
+                        }
+                    )
+                    subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", baseline_step["run"]],
+                        cwd=work / "gitops",
+                        env=base_env,
+                        check=True,
+                    )
+                    subprocess.run(
+                        [
+                            "python3",
+                            str(ROOT / "scripts/update_gitops_images.py"),
+                            str(work / "gitops" / prod_rel),
+                            str(rel_dir),
+                        ],
+                        check=True,
+                    )
+                    gh_output = work / "gh_output"
+                    gh_output.write_text("", encoding="utf-8")
+                    branch_env = os.environ.copy()
+                    branch_env.update(
+                        {
+                            "APPLICATION": "runa",
+                            "SOURCE_SHA": source_sha,
+                            "SOURCE_REPO": "Shhinobi/Runa",
+                            "GITOPS_REPO": "JustShinobi/k3s-gitops-prod",
+                            "BASE_BRANCH": "main",
+                            "PROD_FILE": prod_rel,
+                            "EXPLICIT_SOURCE_REVISION": "false",
+                            "GITOPS_TOKEN": "gtok",
+                            "APP_READ_TOKEN": "tok",
+                            "API_URL": api_url,
+                            "RUNNER_TEMP": str(runner_temp),
+                            "GITHUB_OUTPUT": str(gh_output),
+                        }
+                    )
+                    subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", branch_step["run"]],
+                        cwd=work / "gitops",
+                        env=branch_env,
+                        check=True,
+                    )
+                    outputs = dict(
+                        line.split("=", 1)
+                        for line in gh_output.read_text(encoding="utf-8").splitlines()
+                        if "=" in line
+                    )
+                    if outputs.get("superseded") != "true":
+                        js_harness = f"""
+const fs = require('fs');
+const {{ execFileSync }} = require('child_process');
+const statePath = process.env.MOCK_STATE_PATH;
+const originDir = process.env.MOCK_ORIGIN_DIR;
+const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const core = {{ info: () => {{}}, warning: () => {{}} }};
+const context = {{ repo: {{ owner: 'Shhinobi', repo: 'Runa' }}, serverUrl: 'https://github.com', runId: 999 }};
+const github = {{
+  paginate: async (fn, opts) => (await fn(opts)).data,
+  rest: {{
+    repos: {{
+      get: async () => ({{ data: {{ owner: {{ login: 'Shhinobi' }}, name: 'k3s-gitops-prod' }} }})
+    }},
+    pulls: {{
+      list: async ({{ state: prState }}) => ({{
+        data: state.prs.filter(p => !prState || p.state === prState)
+      }}),
+      create: async ({{ head, base, title, body }}) => {{
+        state.create_calls += 1;
+        const pr = {{ number: state.next_pr++, state: 'open', title, body, head: {{ ref: head }}, base: {{ ref: base }} }};
+        state.prs.push(pr);
+        return {{ data: pr }};
+      }},
+      update: async ({{ pull_number, title, body, state: nextState }}) => {{
+        const pr = state.prs.find(p => p.number === pull_number);
+        if (title !== undefined) {{ pr.title = title; state.update_calls += 1; }}
+        if (body !== undefined) pr.body = body;
+        if (nextState !== undefined) pr.state = nextState;
+        return {{ data: pr }};
+      }}
+    }},
+    issues: {{
+      createComment: async ({{ issue_number, body }}) => {{
+        state.comments.push({{ issue_number, body }});
+        return {{ data: {{}} }};
+      }}
+    }},
+    git: {{
+      listMatchingRefs: async ({{ ref }}) => {{
+        const out = execFileSync('git', ['--git-dir', originDir, 'for-each-ref', '--format=%(refname)', `refs/${{ref}}`], {{ encoding: 'utf8' }});
+        return {{ data: out.split(/\\r?\\n/).filter(Boolean).map(r => ({{ ref: r }})) }};
+      }},
+      deleteRef: async ({{ ref }}) => {{
+        execFileSync('git', ['--git-dir', originDir, 'update-ref', '-d', `refs/${{ref}}`]);
+        return {{}};
+      }}
+    }}
+  }}
+}};
+(async () => {{
+{pr_step['with']['script']}
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+                        pr_env = os.environ.copy()
+                        pr_env.update(
+                            {
+                                "MOCK_STATE_PATH": str(mock_state_path),
+                                "MOCK_ORIGIN_DIR": str(origin),
+                                "REPOSITORY": "JustShinobi/k3s-gitops-prod",
+                                "HEAD_BRANCH": outputs["branch"],
+                                "BASE_BRANCH": "main",
+                                "APPLICATION": "runa",
+                                "SOURCE_SHA": source_sha,
+                                "PROMOTION_MODE": "staging-and-production",
+                                "IMAGE_PROMOTION": "kustomize-images",
+                                "PRODUCTION_PATH": "clusters/prod/workloads/runa-prd",
+                                "PRODUCTION_APP": "prd-runa",
+                                "STAGING_APP": "stg-runa",
+                                "HAS_CHANGES": outputs["has_changes"],
+                                "UNCHANGED_DIGESTS": outputs["unchanged_digests"],
+                                "BASELINE_FILE": str(baseline_json),
+                                "RELEASE_DIR": str(rel_dir),
+                                "APP_READ_TOKEN": "tok",
+                                "GITHUB_API_URL": api_url,
+                            }
+                        )
+                        subprocess.run(["node", "-e", js_harness], cwd=work, env=pr_env, check=True)
+                    return outputs
+
+                # 1. First release (sha1, digest 'a'): creates canonical PR #132, closes #118, deletes legacy + orphan refs
+                out1 = run_pr_cycle(sha1, "a")
+                self.assertEqual(out1["branch"], "promote/runa/production")
+                self.assertEqual(out1["pushed"], "true")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["create_calls"], 1)
+                self.assertEqual([p["number"] for p in state["prs"] if p["state"] == "open"], [132])
+                refs_after_1 = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "for-each-ref", "--format=%(refname)", "refs/heads/promote/"],
+                    text=True,
+                ).splitlines()
+                self.assertEqual(refs_after_1, ["refs/heads/promote/runa/production"])
+
+                # Advance origin/main with an unrelated staging commit to ensure rolling branch rebases cleanly onto 1 commit
+                subprocess.run(["git", "pull", "--quiet", "--rebase", "origin", "main"], cwd=seed, check=True)
+                (seed / stg_rel).write_text(render_img("b"), encoding="utf-8")
+                subprocess.run(["git", "commit", "-am", "stg advance", "--quiet"], cwd=seed, check=True)
+                subprocess.run(["git", "push", "--quiet", "origin", "main"], cwd=seed, check=True)
+
+                # 2. Second release (sha2, digest 'b'): updates PR #132 IN-PLACE (zero new PRs!), keeps 1 clean commit on origin/main
+                out2 = run_pr_cycle(sha2, "b")
+                self.assertEqual(out2["pushed"], "true")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["create_calls"], 1, "must NOT create a second PR!")
+                self.assertEqual(state["update_calls"], 1, "must update existing PR #132 in-place!")
+                open_pr = next(p for p in state["prs"] if p["state"] == "open")
+                self.assertEqual(open_pr["number"], 132)
+                self.assertEqual(open_pr["title"], f"chore(runa): promote {sha2[:12]} to production")
+                self.assertIn("Commits Since Current Production (2)", open_pr["body"])
+                self.assertIn("🔄 Updated", open_pr["body"])
+                ahead_count = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "rev-list", "--count", "refs/heads/main..refs/heads/promote/runa/production"],
+                    text=True,
+                ).strip()
+                self.assertEqual(ahead_count, "1")
+                branch_oid_after_2 = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "rev-parse", "refs/heads/promote/runa/production"],
+                    text=True,
+                ).strip()
+
+                # 3. Third release (sha3, IDENTICAL digest 'b' — CI/docs-only commit): skips push (preserves OID), updates PR metadata!
+                out3 = run_pr_cycle(sha3, "b")
+                self.assertEqual(out3["pushed"], "false")
+                self.assertEqual(out3["unchanged_digests"], "true")
+                branch_oid_after_3 = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "rev-parse", "refs/heads/promote/runa/production"],
+                    text=True,
+                ).strip()
+                self.assertEqual(branch_oid_after_3, branch_oid_after_2, "branch OID must stay untouched when digests are identical")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["create_calls"], 1)
+                open_pr = next(p for p in state["prs"] if p["state"] == "open")
+                self.assertEqual(open_pr["title"], f"chore(runa): promote {sha3[:12]} to production")
+                self.assertIn("Runtime container digests are identical", open_pr["body"])
+                self.assertIn("Commits Since Current Production (4)", open_pr["body"])
+
+                # 4. Out-of-order stale builds:
+                # 4a: sha2_5 (between sha2 and sha3, with DISTINCT digest 'e') MUST be blocked via PR body watermark (zero split-brain!)
+                out4_mid = run_pr_cycle(sha2_5, "e")
+                self.assertEqual(out4_mid["superseded"], "true")
+                self.assertEqual(out4_mid["pushed"], "false")
+                branch_oid_after_4_mid = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "rev-parse", "refs/heads/promote/runa/production"],
+                    text=True,
+                ).strip()
+                self.assertEqual(branch_oid_after_4_mid, branch_oid_after_2, "delayed sha2_5 must NOT overwrite branch!")
+
+                # 4b: sha2 (identical digest) and sha1 (older digest) are ALSO blocked monotonically
+                out4a = run_pr_cycle(sha2, "b")
+                self.assertEqual(out4a["superseded"], "true")
+                self.assertEqual(out4a["pushed"], "false")
+
+                out4 = run_pr_cycle(sha1, "a")
+                self.assertEqual(out4["superseded"], "true")
+                self.assertEqual(out4["pushed"], "false")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                open_pr = next(p for p in state["prs"] if p["state"] == "open")
+                self.assertEqual(open_pr["title"], f"chore(runa): promote {sha3[:12]} to production")
+
+                # 5. Production catches up on main (recording Source-Revision: sha3) -> re-running sha3 closes PR #132 and deletes branch!
+                subprocess.run(["git", "pull", "--quiet", "--rebase", "origin", "main"], cwd=seed, check=True)
+                (seed / prod_rel).write_text(render_img("b"), encoding="utf-8")
+                subprocess.run(
+                    [
+                        "git",
+                        "commit",
+                        "-am",
+                        f"chore(runa): promote {sha3[:12]} to production",
+                        "-m",
+                        "Source-Repository: Shhinobi/Runa",
+                        "-m",
+                        f"Source-Revision: {sha3}",
+                        "--quiet",
+                    ],
+                    cwd=seed,
+                    check=True,
+                )
+                subprocess.run(["git", "push", "--quiet", "origin", "main"], cwd=seed, check=True)
+
+                out5 = run_pr_cycle(sha3, "b")
+                self.assertEqual(out5["has_changes"], "false")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                self.assertEqual([p for p in state["prs"] if p["state"] == "open"], [])
+                refs_after_5 = subprocess.check_output(
+                    ["git", "--git-dir", str(origin), "for-each-ref", "--format=%(refname)", "refs/heads/promote/"],
+                    text=True,
+                ).splitlines()
+                self.assertEqual(refs_after_5, [])
+
+                # 6. Post-merge delete_branch_on_merge guard: promote/runa/production no longer exists,
+                #    and a delayed sha1 (digest 'a' != prod 'b') MUST still be blocked by Watermark 1 on origin/main!
+                out6 = run_pr_cycle(sha1, "a")
+                self.assertEqual(out6["superseded"], "true")
+                self.assertEqual(out6["pushed"], "false")
+                state = json.loads(mock_state_path.read_text(encoding="utf-8"))
+                self.assertEqual([p for p in state["prs"] if p["state"] == "open"], [])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_rollback_reuses_rolling_branch_and_supports_chart_values(self) -> None:
+        import yaml
+
+        rollback_text = (ROOT / ".github/workflows/rollback.yml").read_text(encoding="utf-8")
+        self.assertIn('branch="rollback/${APPLICATION}/production"', rollback_text)
+        self.assertIn('--force-with-lease="refs/heads/${branch}:${remote_oid}"', rollback_text)
+        self.assertIn("values-prd.yaml", rollback_text)
+
+        wf = yaml.safe_load(rollback_text)
+        steps = wf["jobs"]["rollback"]["steps"]
+        select_step = next(s for s in steps if s.get("name") == "Select bounded target")
+        restore_step = next(s for s in steps if s.get("name") == "Restore exact image patch")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out_file = root / "select_out"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "TARGET_ENVIRONMENT": "prod",
+                    "BASE_BRANCH": "main",
+                    "STAGING_PATH": "clusters/prod/workloads/app-stg",
+                    "PRODUCTION_PATH": "clusters/prod/workloads/app-prd",
+                    "IMAGE_PROMOTION": "chart-values",
+                    "GITHUB_OUTPUT": str(out_file),
+                }
+            )
+            subprocess.run(["bash", "-euo", "pipefail", "-c", select_step["run"]], env=env, check=True)
+            kv = dict(line.split("=", 1) for line in out_file.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(kv["file"], "values-prd.yaml")
+
+            origin = root / "origin.git"
+            work = root / "gitops"
+            runner_temp = root / "runner_temp"
+            runner_temp.mkdir()
+            subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(origin)], check=True)
+            subprocess.run(["git", "clone", "--quiet", str(origin), str(work)], check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=work, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=work, check=True)
+
+            target_rel = Path("clusters/prod/workloads/app-prd/values-prd.yaml")
+            (work / target_rel).parent.mkdir(parents=True)
+            (work / target_rel).write_text("api:\n  image:\n    digest: sha256:" + "1" * 64 + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=work, check=True)
+            subprocess.run(["git", "commit", "-m", "rev1", "--quiet"], cwd=work, check=True)
+            rev1 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+
+            (work / target_rel).write_text("api:\n  image:\n    digest: sha256:" + "2" * 64 + "\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "rev2", "--quiet"], cwd=work, check=True)
+            rev2 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+
+            (work / target_rel).write_text("api:\n  image:\n    digest: sha256:" + "3" * 64 + "\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "rev3", "--quiet"], cwd=work, check=True)
+            subprocess.run(["git", "push", "--quiet", "origin", "main"], cwd=work, check=True)
+
+            for rev in (rev1, rev2):
+                r_out = root / f"restore_{rev[:6]}"
+                r_env = os.environ.copy()
+                r_env.update(
+                    {
+                        "REVISION": rev,
+                        "TARGET_PATH": "clusters/prod/workloads/app-prd",
+                        "TARGET_FILE": "values-prd.yaml",
+                        "TARGET_ENVIRONMENT": "prod",
+                        "APPLICATION": "app",
+                        "BASE_BRANCH": "main",
+                        "RUNNER_TEMP": str(runner_temp),
+                        "GITHUB_OUTPUT": str(r_out),
+                    }
+                )
+                subprocess.run(["bash", "-euo", "pipefail", "-c", restore_step["run"]], cwd=work, env=r_env, check=True)
+                r_kv = dict(line.split("=", 1) for line in r_out.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(r_kv["branch"], "rollback/app/production")
+                self.assertEqual(r_kv["has_changes"], "true")
+
+            ahead = subprocess.check_output(
+                ["git", "--git-dir", str(origin), "rev-list", "--count", "refs/heads/main..refs/heads/rollback/app/production"],
+                text=True,
+            ).strip()
+            self.assertEqual(ahead, "1")
 
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")
