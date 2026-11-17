@@ -1308,8 +1308,27 @@ jobs:
                                   if m_dig:
                                       digests[f"{w}/{c['name']}"] = m_dig.group(1)
               except Exception:
-                  for m_line in re.finditer(r"name:\s*([a-z0-9-]+)\s+image:\s*\S+@(sha256:[0-9a-f]{64})", raw):
-                      digests[m_line.group(1)] = m_line.group(2)
+                  if mode == "chart-values":
+                      cur_full = ""
+                      for line in raw.splitlines():
+                          m_f = re.match(r"^\s+fullnameOverride:\s*([a-z0-9-]+)\s*$", line)
+                          if m_f:
+                              cur_full = m_f.group(1)
+                          m_d = re.match(r"^\s+digest:\s*(sha256:[0-9a-f]{64})\s*$", line)
+                          if m_d and cur_full:
+                              digests[cur_full] = m_d.group(1)
+                              cur_full = ""
+                  else:
+                      for doc_block in raw.split("\n---"):
+                          m_meta = re.search(r"(?m)^metadata:\s*\n(?:\s+.*\n)*?\s+name:\s*([a-z0-9-]+)", doc_block)
+                          if not m_meta:
+                              continue
+                          w_name = m_meta.group(1)
+                          for m_c in re.finditer(
+                              r"-\s*name:\s*([a-z0-9-]+)\s*\n\s*image:\s*\S+@(sha256:[0-9a-f]{64})",
+                              doc_block,
+                          ):
+                              digests[f"{w_name}/{m_c.group(1)}"] = m_c.group(2)
 
           out_file.write_text(
               json.dumps({"prev_source_sha": prev_source_sha, "digests": digests}, sort_keys=True),

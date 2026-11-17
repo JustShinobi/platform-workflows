@@ -826,8 +826,12 @@ class WorkflowContractTests(unittest.TestCase):
                             "PROD_FILE": prod_rel,
                             "IMAGE_PROMOTION": "kustomize-images",
                             "BASELINE_JSON": str(baseline_json),
+                            "PYTHONPATH": str(root / "no_yaml_shim"),
                         }
                     )
+                    shim_dir = root / "no_yaml_shim"
+                    shim_dir.mkdir(exist_ok=True)
+                    (shim_dir / "yaml.py").write_text("raise ImportError('no PyYAML on slim runner')\n", encoding="utf-8")
                     subprocess.run(
                         ["bash", "-euo", "pipefail", "-c", baseline_step["run"]],
                         cwd=work / "gitops",
@@ -984,6 +988,7 @@ const github = {{
                 self.assertEqual(open_pr["number"], 132)
                 self.assertEqual(open_pr["title"], f"chore(runa): promote {sha2[:12]} to production")
                 self.assertIn("Commits Since Current Production (2)", open_pr["body"])
+                self.assertIn("`sha256:000000000000…`", open_pr["body"])
                 self.assertIn("🔄 Updated", open_pr["body"])
                 ahead_count = subprocess.check_output(
                     ["git", "--git-dir", str(origin), "rev-list", "--count", "refs/heads/main..refs/heads/promote/runa/production"],
