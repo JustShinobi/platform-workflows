@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v4.2.2
 
       - name: Validate delivery contract
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@561649627a5f571d7f08fbdf6c6b8faed058a370
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@0d18d31f2b76cdba12ce469784c60ff2448e1f6d
         with:
           descriptor: ${{ inputs.descriptor }}
 

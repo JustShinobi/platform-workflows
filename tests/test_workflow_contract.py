@@ -349,7 +349,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_t14_release_pins_actions_with_workflow_revision_support(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        provenance_revision = "561649627a5f571d7f08fbdf6c6b8faed058a370"
+        provenance_revision = "0d18d31f2b76cdba12ce469784c60ff2448e1f6d"
         descriptor = (
             "JustShinobi/platform-workflows/.github/actions/descriptor@"
             + provenance_revision
