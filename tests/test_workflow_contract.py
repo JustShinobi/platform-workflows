@@ -349,7 +349,7 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_t14_release_pins_actions_with_workflow_revision_support(self) -> None:
         release = (ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8")
-        provenance_revision = "141795287a15a540b5396914d99247a1f8f82d8e"
+        provenance_revision = "561649627a5f571d7f08fbdf6c6b8faed058a370"
         descriptor = (
             "JustShinobi/platform-workflows/.github/actions/descriptor@"
             + provenance_revision
@@ -407,6 +407,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("needs.prepare.outputs.t14_build_only != 'true'", staging["if"])
         self.assertIn("needs.prepare.outputs.promotion_mode != 'production-only'", staging["if"])
         self.assertIn("needs.prepare.outputs.t14_build_only != 'true'", production["if"])
+        self.assertIn("needs.prepare.outputs.promotion_mode != 'staging-only'", production["if"])
         self.assertIn(
             "(needs.promote-staging.result == 'skipped' && needs.prepare.outputs.promotion_mode == 'production-only')",
             production["if"],

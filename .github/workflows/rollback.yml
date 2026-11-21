@@ -43,7 +43,7 @@ jobs:
 
       - name: Validate delivery contract
         id: descriptor
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@141795287a15a540b5396914d99247a1f8f82d8e
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@561649627a5f571d7f08fbdf6c6b8faed058a370
         with:
           descriptor: ${{ inputs.descriptor }}
 
@@ -69,12 +69,14 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$TARGET_ENVIRONMENT" == stg ]]; then
+            [[ -n "$STAGING_PATH" ]] || { echo "Staging rollback is not configured for this application." >&2; exit 2; }
             file_name="images.yaml"
             if [[ "$IMAGE_PROMOTION" == "chart-values" ]]; then
               file_name="values-stg.yaml"
             fi
             printf 'branch=%s\npath=%s\nfile=%s\n' "$BASE_BRANCH" "$STAGING_PATH" "$file_name" >> "$GITHUB_OUTPUT"
           else
+            [[ -n "$PRODUCTION_PATH" ]] || { echo "Production rollback is not configured for this application." >&2; exit 2; }
             file_name="images.yaml"
             if [[ "$IMAGE_PROMOTION" == "chart-values" ]]; then
               file_name="values-prd.yaml"

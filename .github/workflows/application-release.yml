@@ -131,7 +131,7 @@ jobs:
 
       - name: Validate delivery contract
         id: descriptor
-        uses: JustShinobi/platform-workflows/.github/actions/descriptor@141795287a15a540b5396914d99247a1f8f82d8e
+        uses: JustShinobi/platform-workflows/.github/actions/descriptor@561649627a5f571d7f08fbdf6c6b8faed058a370
         with:
           descriptor: ${{ inputs.descriptor }}
 
@@ -818,7 +818,7 @@ jobs:
 
       - name: Update staging image patches
         if: steps.monotonic_guard.outputs.superseded != 'true'
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@561649627a5f571d7f08fbdf6c6b8faed058a370
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_staging_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-stg.yaml' || 'images.yaml' }}
           release-directory: release
@@ -827,7 +827,7 @@ jobs:
 
       - name: Update T14 image patches
         if: steps.monotonic_guard.outputs.superseded != 'true' && needs.prepare.outputs.t14_enabled == 'true'
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@561649627a5f571d7f08fbdf6c6b8faed058a370
         with:
           images-file: gitops/${{ needs.prepare.outputs.t14_gitops_path }}/images.yaml
           release-directory: release
@@ -1097,6 +1097,7 @@ jobs:
       always() && needs.prepare.result == 'success' &&
       needs.build.result == 'success' &&
       needs.prepare.outputs.t14_build_only != 'true' &&
+      needs.prepare.outputs.promotion_mode != 'staging-only' &&
       needs.promote-staging.outputs.superseded != 'true' &&
       (
         needs.promote-staging.result == 'success' ||
@@ -1341,7 +1342,7 @@ jobs:
           PY
 
       - name: Update production image patches
-        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@141795287a15a540b5396914d99247a1f8f82d8e
+        uses: JustShinobi/platform-workflows/.github/actions/update-gitops-images@561649627a5f571d7f08fbdf6c6b8faed058a370
         with:
           images-file: gitops/${{ needs.prepare.outputs.gitops_production_path }}/${{ needs.prepare.outputs.image_promotion == 'chart-values' && 'values-prd.yaml' || 'images.yaml' }}
           release-directory: release
