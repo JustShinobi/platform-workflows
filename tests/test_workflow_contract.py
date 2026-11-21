@@ -1191,6 +1191,65 @@ const github = {{
                 f"workflow {path.name} uses redundant/invalid '${{{{ }}}}' syntax in 'if' conditional",
             )
 
+    def test_argocd_health_wait_accepts_single_and_multi_source_sync_revisions(self) -> None:
+        import http.server
+        import threading
+        import yaml
+
+        wf = yaml.safe_load((ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8"))
+        wait_step = next(
+            s for s in wf["jobs"]["promote-staging"]["steps"] if s.get("name") == "Wait for Argo CD staging health"
+        )
+        self.assertIn(".status.sync.revisions", wait_step["run"])
+
+        target_rev = "e4e1b0a37d87" + "0" * 28
+        payload_holder = {
+            "body": {
+                "status": {
+                    "health": {"status": "Healthy"},
+                    "sync": {"status": "Synced", "revisions": ["3.1.3", target_rev]},
+                }
+            }
+        }
+
+        class ArgoHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+            def do_GET(self) -> None:  # noqa: N802
+                body = json.dumps(payload_holder["body"]).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ArgoHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            env = os.environ.copy()
+            env.update(
+                {
+                    "ARGOCD_SERVER": f"http://127.0.0.1:{server.server_port}",
+                    "ARGOCD_AUTH_TOKEN": "tok",
+                    "APPLICATION": "stg-runa",
+                    "REVISION": target_rev,
+                }
+            )
+            # Multi-source Application (.status.sync.revisions) succeeds immediately
+            subprocess.run(["bash", "-euo", "pipefail", "-c", wait_step["run"]], env=env, check=True)
+            # Single-source Application (.status.sync.revision) also succeeds immediately
+            payload_holder["body"] = {
+                "status": {
+                    "health": {"status": "Healthy"},
+                    "sync": {"status": "Synced", "revision": target_rev},
+                }
+            }
+            subprocess.run(["bash", "-euo", "pipefail", "-c", wait_step["run"]], env=env, check=True)
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

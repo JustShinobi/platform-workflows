@@ -974,14 +974,15 @@ jobs:
           set -euo pipefail
           check_ready() {
             local query="${1:-}"
-            local status health sync revision
+            local status
             status="$(curl --fail --silent --show-error \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
               "$ARGOCD_SERVER/api/v1/applications/${APPLICATION}${query}")"
-            health="$(jq -r '.status.health.status // ""' <<<"$status")"
-            sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
-            revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
-            [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]
+            jq -e --arg rev "$REVISION" '
+              (.status.health.status // "") == "Healthy" and
+              (.status.sync.status // "") == "Synced" and
+              ((.status.sync.revision // "") == $rev or ((.status.sync.revisions // []) | index($rev) != null))
+            ' <<<"$status" >/dev/null
           }
           if check_ready "?refresh=normal"; then
             exit 0
@@ -995,10 +996,11 @@ jobs:
               payload="${line#data:}"
               payload="${payload#"${payload%%[![:space:]]*}"}"
               [[ "$payload" == \{* ]] || continue
-              health="$(jq -r '.result.application.status.health.status // ""' <<<"$payload" 2>/dev/null || true)"
-              sync="$(jq -r '.result.application.status.sync.status // ""' <<<"$payload" 2>/dev/null || true)"
-              revision="$(jq -r '.result.application.status.sync.revision // ""' <<<"$payload" 2>/dev/null || true)"
-              if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
+              if jq -e --arg rev "$REVISION" '
+                (.result.application.status.health.status // "") == "Healthy" and
+                (.result.application.status.sync.status // "") == "Synced" and
+                ((.result.application.status.sync.revision // "") == $rev or ((.result.application.status.sync.revisions // []) | index($rev) != null))
+              ' <<<"$payload" >/dev/null 2>&1; then
                 exit 0
               fi
             done < <(curl --silent --no-buffer --max-time "$window" \
@@ -1023,14 +1025,15 @@ jobs:
           set -euo pipefail
           check_ready() {
             local query="${1:-}"
-            local status health sync revision
+            local status
             status="$(curl --fail --silent --show-error \
               -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
               "$ARGOCD_SERVER/api/v1/applications/${APPLICATION}${query}")"
-            health="$(jq -r '.status.health.status // ""' <<<"$status")"
-            sync="$(jq -r '.status.sync.status // ""' <<<"$status")"
-            revision="$(jq -r '.status.sync.revision // ""' <<<"$status")"
-            [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]
+            jq -e --arg rev "$REVISION" '
+              (.status.health.status // "") == "Healthy" and
+              (.status.sync.status // "") == "Synced" and
+              ((.status.sync.revision // "") == $rev or ((.status.sync.revisions // []) | index($rev) != null))
+            ' <<<"$status" >/dev/null
           }
           if check_ready "?refresh=normal"; then
             exit 0
@@ -1044,10 +1047,11 @@ jobs:
               payload="${line#data:}"
               payload="${payload#"${payload%%[![:space:]]*}"}"
               [[ "$payload" == \{* ]] || continue
-              health="$(jq -r '.result.application.status.health.status // ""' <<<"$payload" 2>/dev/null || true)"
-              sync="$(jq -r '.result.application.status.sync.status // ""' <<<"$payload" 2>/dev/null || true)"
-              revision="$(jq -r '.result.application.status.sync.revision // ""' <<<"$payload" 2>/dev/null || true)"
-              if [[ "$health" == Healthy && "$sync" == Synced && "$revision" == "$REVISION" ]]; then
+              if jq -e --arg rev "$REVISION" '
+                (.result.application.status.health.status // "") == "Healthy" and
+                (.result.application.status.sync.status // "") == "Synced" and
+                ((.result.application.status.sync.revision // "") == $rev or ((.result.application.status.sync.revisions // []) | index($rev) != null))
+              ' <<<"$payload" >/dev/null 2>&1; then
                 exit 0
               fi
             done < <(curl --silent --no-buffer --max-time "$window" \
