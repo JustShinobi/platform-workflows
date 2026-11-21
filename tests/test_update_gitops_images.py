@@ -94,6 +94,56 @@ class GitOpsImageTests(unittest.TestCase):
             self.assertEqual(data["api"]["image"]["digest"], "sha256:" + "a" * 64)
             self.assertNotIn("digest", data["worker"]["image"])
 
+    def test_chart_values_updates_root_fullname_override_and_extra_containers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            values = root / "values-prd.yaml"
+            values.write_text(
+                "fullnameOverride: auto-application\n"
+                "containerName: web\n"
+                "image:\n"
+                "  repository: registry.lan/auto-application/web\n"
+                "  digest: sha256:" + "1" * 64 + "\n"
+                "extraContainers:\n"
+                "  - name: worker\n"
+                "    image: registry.lan/auto-application/worker@sha256:" + "2" * 64 + "\n",
+                encoding="utf-8",
+            )
+            release_dir = root / "release"
+            release_dir.mkdir()
+            (release_dir / "web.json").write_text(
+                json.dumps(
+                    {
+                        "component": "web",
+                        "image": "registry.lan/auto-application/web",
+                        "digest": "sha256:" + "a" * 64,
+                        "workload": "auto-application",
+                        "container": "web",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (release_dir / "worker.json").write_text(
+                json.dumps(
+                    {
+                        "component": "worker",
+                        "image": "registry.lan/auto-application/worker",
+                        "digest": "sha256:" + "b" * 64,
+                        "workload": "auto-application",
+                        "container": "worker",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            update_chart_values(values, load_release(release_dir))
+            data = yaml.safe_load(values.read_text(encoding="utf-8"))
+            self.assertEqual(data["image"]["repository"], "registry.lan/auto-application/web")
+            self.assertEqual(data["image"]["digest"], "sha256:" + "a" * 64)
+            self.assertEqual(
+                data["extraContainers"][0]["image"],
+                "registry.lan/auto-application/worker@sha256:" + "b" * 64,
+            )
+
     def test_chart_values_fails_closed_for_missing_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

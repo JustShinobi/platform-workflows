@@ -98,6 +98,38 @@ def load_release_fragment(path: Path) -> dict[tuple[str, str], str]:
     return {target: f"{data['image']}@{digest}"}
 
 
+def _iter_chart_workload_sections(
+    document: dict[str, object],
+) -> list[tuple[str, dict[str, object]]]:
+    sections: list[tuple[str, dict[str, object]]] = []
+    seen_workloads: set[str] = set()
+
+    def _register(label: str, values: dict[str, object]) -> None:
+        workload = values.get("fullnameOverride")
+        if not isinstance(workload, str) or not workload:
+            return
+        if workload in seen_workloads:
+            raise ValueError(f"duplicate fullnameOverride in chart values: {workload}")
+        seen_workloads.add(workload)
+        sections.append((label, values))
+
+    if isinstance(document.get("fullnameOverride"), str):
+        _register("<root>", document)
+
+    components = document.get("components")
+    if isinstance(components, dict):
+        for comp_name, comp_vals in components.items():
+            if isinstance(comp_vals, dict):
+                _register(f"components.{comp_name}", comp_vals)
+
+    for section, values in document.items():
+        if section in {"components", "defaults"} or not isinstance(values, dict):
+            continue
+        _register(str(section), values)
+
+    return sections
+
+
 def update_chart_values(
     path: Path,
     release: dict[tuple[str, str], str],
@@ -105,38 +137,87 @@ def update_chart_values(
 ) -> None:
     """Apply immutable digests to a wrapper-chart values file.
 
-    Each top-level alias section whose ``fullnameOverride`` equals the
-    fragment workload receives ``image.repository`` and ``image.digest``.
+    Supports both root-level ``fullnameOverride`` (single-workload chart values)
+    and top-level / ``components.*`` alias sections, updating primary ``image``
+    mappings as well as ``extraContainers`` and ``initContainers`` sidecars.
     """
-    by_workload: dict[str, tuple[str, str]] = {}
-    for (workload, _container), target in release.items():
-        if workload in by_workload:
-            raise ValueError(
-                f"chart-values mode requires one container per workload: {workload}"
-            )
+    by_workload: dict[str, list[tuple[str, str, str, str]]] = {}
+    for (workload, container), target in release.items():
         image, _, digest = target.rpartition("@")
-        by_workload[workload] = (image, digest)
+        by_workload.setdefault(workload, []).append((container, target, image, digest))
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise ValueError(f"chart values file must be a mapping: {path}")
-    remaining = set(by_workload)
-    for section, values in document.items():
-        if not isinstance(values, dict):
+
+    remaining = set(release)
+    for section, values in _iter_chart_workload_sections(document):
+        workload = str(values["fullnameOverride"])
+        targets = by_workload.get(workload)
+        if not targets:
             continue
-        workload = values.get("fullnameOverride")
-        if workload not in remaining:
-            continue
-        image, digest = by_workload[workload]
-        image_values = values.setdefault("image", {})
-        if not isinstance(image_values, dict):
-            raise ValueError(f"{path}: section {section} has a non-mapping image")
-        image_values["repository"] = image
-        image_values["digest"] = digest
-        remaining.remove(workload)
-    remaining -= {workload for workload, _container in (allow_missing_targets or set())}
+
+        sidecars: list[dict[str, object]] = []
+        sidecar_names: set[str] = set()
+        for list_key in ("extraContainers", "initContainers"):
+            raw_list = values.get(list_key)
+            if raw_list is None:
+                continue
+            if not isinstance(raw_list, list):
+                raise ValueError(f"{path}: section {section} {list_key} must be a list")
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"{path}: section {section} {list_key} entries must be mappings"
+                    )
+                sidecars.append(item)
+                cname = item.get("name")
+                if isinstance(cname, str) and cname:
+                    sidecar_names.add(cname)
+
+        raw_cname = values.get("containerName")
+        explicit_primary = raw_cname if isinstance(raw_cname, str) and raw_cname else ""
+        default_primary = explicit_primary or workload
+        primary_updated = False
+
+        for container, target_ref, image, digest in targets:
+            matches_primary = (
+                container == default_primary
+                or (not explicit_primary and container == "app" and "app" not in sidecar_names)
+                or (
+                    len(targets) == 1
+                    and not explicit_primary
+                    and container not in sidecar_names
+                )
+            )
+            if matches_primary:
+                if primary_updated:
+                    raise ValueError(
+                        f"{path}: multiple release targets map to primary image in {section} ({workload})"
+                    )
+                image_values = values.setdefault("image", {})
+                if not isinstance(image_values, dict):
+                    raise ValueError(f"{path}: section {section} has a non-mapping image")
+                image_values["repository"] = image
+                image_values["digest"] = digest
+                primary_updated = True
+                remaining.remove((workload, container))
+            else:
+                matched = [item for item in sidecars if item.get("name") == container]
+                if not matched:
+                    continue
+                if len(matched) > 1:
+                    raise ValueError(
+                        f"{path}: section {section} has duplicate container name {container!r}"
+                    )
+                matched[0]["image"] = target_ref
+                remaining.remove((workload, container))
+
+    remaining -= allow_missing_targets or set()
     if remaining:
-        missing = ", ".join(sorted(remaining))
+        missing = ", ".join(
+            f"{workload}/{container}" for workload, container in sorted(remaining)
+        )
         raise ValueError(
             f"chart values is missing release targets (fullnameOverride): {missing}"
         )

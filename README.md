@@ -156,7 +156,7 @@ O `platform-workflows` suporta dois modos de promoção declarados no campo `git
 
 1. **`chart-values` (Recomendado / Canônico):**
    - Utilizado por aplicações empacotadas via Wrapper Chart do [`charts/homelab-k8s-app-chart`](https://github.com/JustShinobi/infra-cluster/tree/main/charts/homelab-k8s-app-chart).
-   - O pipeline localiza a dependência com `alias` correspondente ao componente e atualiza `image.digest` diretamente no `values-prd.yaml` / `values-stg.yaml`.
+   - O pipeline localiza o workload por `fullnameOverride` (tanto na raiz single-component quanto em seções top-level / `components.*`) e atualiza `image.{repository,digest}` do container primário (`containerName`) além de `extraContainers` e `initContainers` cooperativos em `values-prd.yaml` / `values-stg.yaml`.
 2. **`kustomize-patch`:**
    - Utilizado por aplicações com overlays tradicionais do Kustomize.
    - O pipeline aplica uma atualização de patch no arquivo `images.yaml` declarado em `stagingPath` e `productionPath`.

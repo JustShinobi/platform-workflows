@@ -1165,6 +1165,67 @@ const github = {{
     def test_descriptor_does_not_accept_commands(self) -> None:
         validator = (ROOT / "scripts/validate_descriptor.py").read_text(encoding="utf-8")
         self.assertNotIn('"command"', validator)
+
+    def test_chart_values_baseline_extracts_root_and_extra_container_digests_with_and_without_pyyaml(self) -> None:
+        import os
+        import subprocess
+        import tempfile
+        import yaml
+
+        workflow = yaml.safe_load((ROOT / ".github/workflows/application-release.yml").read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["propose-production"]["steps"]
+        baseline_step = next(s for s in steps if s.get("name") == "Capture current production baseline")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+            prod_rel = "clusters/prod/workloads/auto-application/values-prd.yaml"
+            prod_file = root / prod_rel
+            prod_file.parent.mkdir(parents=True, exist_ok=True)
+            prod_file.write_text(
+                "fullnameOverride: auto-application\n"
+                "containerName: web\n"
+                "image:\n"
+                "  repository: registry.lan.kyo.ninja/auto-application/web\n"
+                "  digest: sha256:" + "1" * 64 + "\n"
+                "extraContainers:\n"
+                "  - volumeMounts:\n"
+                "      - name: data\n"
+                "        mountPath: /data\n"
+                "    image: registry.lan.kyo.ninja/auto-application/worker@sha256:" + "2" * 64 + "\n"
+                "    name: worker\n"
+                "persistence:\n"
+                "  litestream:\n"
+                "    image: docker.io/litestream/litestream:0.3.13@sha256:" + "9" * 64 + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "init", "--quiet"], cwd=root, check=True)
+
+            for use_shim in (False, True):
+                out_json = root / f"baseline_{use_shim}.json"
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "APPLICATION": "auto-application",
+                        "SOURCE_REPO": "JustShinobi/ninja-get-job",
+                        "PROD_FILE": prod_rel,
+                        "IMAGE_PROMOTION": "chart-values",
+                        "BASELINE_JSON": str(out_json),
+                    }
+                )
+                if use_shim:
+                    shim = root / "no_yaml_shim"
+                    shim.mkdir(exist_ok=True)
+                    (shim / "yaml.py").write_text("raise ImportError('no PyYAML')\n", encoding="utf-8")
+                    env["PYTHONPATH"] = str(shim)
+                subprocess.run(["bash", "-euo", "pipefail", "-c", baseline_step["run"]], cwd=root, env=env, check=True)
+                parsed = json.loads(out_json.read_text(encoding="utf-8"))
+                self.assertEqual(parsed["digests"]["auto-application/web"], "sha256:" + "1" * 64)
+                self.assertEqual(parsed["digests"]["auto-application/worker"], "sha256:" + "2" * 64)
+                self.assertNotIn("auto-application/data", parsed["digests"])
     def test_workflow_call_secrets_do_not_contain_description(self) -> None:
         import yaml
         for path in (ROOT / ".github/workflows").glob("*.yml"):

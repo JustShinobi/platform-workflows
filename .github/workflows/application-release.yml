@@ -1296,11 +1296,37 @@ jobs:
                   if mode == "chart-values":
                       doc = yaml.safe_load(raw)
                       if isinstance(doc, dict):
-                          for _sec, vals in doc.items():
-                              if isinstance(vals, dict) and isinstance(vals.get("fullnameOverride"), str):
-                                  img = vals.get("image")
-                                  if isinstance(img, dict) and isinstance(img.get("digest"), str):
-                                      digests[vals["fullnameOverride"]] = img["digest"]
+                          sections = []
+                          if isinstance(doc.get("fullnameOverride"), str):
+                              sections.append(doc)
+                          comps = doc.get("components")
+                          if isinstance(comps, dict):
+                              sections.extend(v for v in comps.values() if isinstance(v, dict))
+                          sections.extend(
+                              v
+                              for k, v in doc.items()
+                              if k not in {"components", "defaults"} and isinstance(v, dict)
+                          )
+                          for vals in sections:
+                              w = vals.get("fullnameOverride")
+                              if not isinstance(w, str) or not w:
+                                  continue
+                              img = vals.get("image")
+                              cname = vals.get("containerName")
+                              primary = cname if isinstance(cname, str) and cname else w
+                              if isinstance(img, dict) and isinstance(img.get("digest"), str):
+                                  digests[w] = img["digest"]
+                                  digests[f"{w}/{primary}"] = img["digest"]
+                              for list_key in ("extraContainers", "initContainers"):
+                                  for c in vals.get(list_key) or []:
+                                      if (
+                                          isinstance(c, dict)
+                                          and c.get("name")
+                                          and isinstance(c.get("image"), str)
+                                      ):
+                                          m_dig = re.search(r"(sha256:[0-9a-f]{64})", c["image"])
+                                          if m_dig:
+                                              digests[f"{w}/{c['name']}"] = m_dig.group(1)
                   else:
                       for doc in yaml.safe_load_all(raw):
                           if not isinstance(doc, dict) or doc.get("kind") != "Deployment":
@@ -1315,14 +1341,85 @@ jobs:
               except Exception:
                   if mode == "chart-values":
                       cur_full = ""
+                      cur_cname = ""
+                      primary_recorded = False
+                      containers_indent = -1
+                      item_prop_indent = -1
+                      item_name = ""
+                      item_digest = ""
                       for line in raw.splitlines():
-                          m_f = re.match(r"^\s+fullnameOverride:\s*([a-z0-9-]+)\s*$", line)
+                          if not line.strip() or line.lstrip().startswith("#"):
+                              continue
+                          m_f = re.match(r"^(\s*)fullnameOverride:\s*['\"]?([a-z0-9-]+)['\"]?\s*$", line)
                           if m_f:
-                              cur_full = m_f.group(1)
-                          m_d = re.match(r"^\s+digest:\s*(sha256:[0-9a-f]{64})\s*$", line)
-                          if m_d and cur_full:
+                              cur_full = m_f.group(2)
+                              cur_cname = ""
+                              primary_recorded = False
+                              containers_indent = -1
+                              item_prop_indent = -1
+                              item_name = ""
+                              item_digest = ""
+                              continue
+                          if not cur_full:
+                              continue
+                          m_blk = re.match(r"^(\s*)(?:extraContainers|initContainers):\s*$", line)
+                          if m_blk:
+                              containers_indent = len(m_blk.group(1))
+                              item_prop_indent = -1
+                              item_name = ""
+                              item_digest = ""
+                              continue
+                          if containers_indent >= 0:
+                              lead = len(line) - len(line.lstrip(" "))
+                              m_dash = re.match(r"^(\s*)-\s+(.*)$", line)
+                              if lead < containers_indent or (lead == containers_indent and not m_dash):
+                                  containers_indent = -1
+                                  item_prop_indent = -1
+                                  item_name = ""
+                                  item_digest = ""
+                              elif m_dash and (item_prop_indent < 0 or len(m_dash.group(1)) < item_prop_indent):
+                                  dash_indent = len(m_dash.group(1))
+                                  rest = m_dash.group(2)
+                                  item_prop_indent = dash_indent + (len(line) - dash_indent - len(rest))
+                                  item_name = ""
+                                  item_digest = ""
+                                  m_in0 = re.match(r"^name:\s*['\"]?([a-z0-9-]+)['\"]?\s*$", rest)
+                                  if m_in0:
+                                      item_name = m_in0.group(1)
+                                  m_im0 = re.match(r"^image:\s*['\"]?\S+@(sha256:[0-9a-f]{64})['\"]?\s*$", rest)
+                                  if m_im0:
+                                      item_digest = m_im0.group(1)
+                                  continue
+                              elif lead == item_prop_indent:
+                                  prop = line.lstrip(" ")
+                                  m_in = re.match(r"^name:\s*['\"]?([a-z0-9-]+)['\"]?\s*$", prop)
+                                  if m_in:
+                                      item_name = m_in.group(1)
+                                      if item_digest:
+                                          digests[f"{cur_full}/{item_name}"] = item_digest
+                                          item_name = ""
+                                          item_digest = ""
+                                      continue
+                                  m_im = re.match(r"^image:\s*['\"]?\S+@(sha256:[0-9a-f]{64})['\"]?\s*$", prop)
+                                  if m_im:
+                                      item_digest = m_im.group(1)
+                                      if item_name:
+                                          digests[f"{cur_full}/{item_name}"] = item_digest
+                                          item_name = ""
+                                          item_digest = ""
+                                      continue
+                              continue
+                          m_cn = re.match(r"^\s*containerName:\s*['\"]?([a-z0-9-]+)['\"]?\s*$", line)
+                          if m_cn:
+                              cur_cname = m_cn.group(1)
+                              if cur_full in digests:
+                                  digests[f"{cur_full}/{cur_cname}"] = digests[cur_full]
+                              continue
+                          m_d = re.match(r"^\s*digest:\s*['\"]?(sha256:[0-9a-f]{64})['\"]?\s*$", line)
+                          if m_d and not primary_recorded:
                               digests[cur_full] = m_d.group(1)
-                              cur_full = ""
+                              digests[f"{cur_full}/{cur_cname or cur_full}"] = m_d.group(1)
+                              primary_recorded = True
                   else:
                       for doc_block in raw.split("\n---"):
                           m_meta = re.search(r"(?m)^metadata:\s*\n(?:\s+.*\n)*?\s+name:\s*([a-z0-9-]+)", doc_block)
@@ -1751,11 +1848,20 @@ jobs:
                   '| Component | Target | Previous Prod Digest | Candidate Digest | Status |',
                   '| :--- | :--- | :--- | :--- | :---: |'
                 );
+                const workloadCounts = new Map();
                 for (const rec of releaseRecords) {
-                  const key = imagePromotion === 'chart-values'
+                  workloadCounts.set(rec.workload, (workloadCounts.get(rec.workload) || 0) + 1);
+                }
+                for (const rec of releaseRecords) {
+                  const compoundKey = `${rec.workload}/${rec.container}`;
+                  const multiContainer = (workloadCounts.get(rec.workload) || 0) > 1;
+                  const key = imagePromotion === 'chart-values' && !multiContainer
                     ? rec.workload
-                    : `${rec.workload}/${rec.container}`;
-                  const prevDig = (baseline.digests && baseline.digests[key]) || '';
+                    : compoundKey;
+                  const prevDig = (baseline.digests && (
+                    baseline.digests[compoundKey] ||
+                    (!multiContainer ? baseline.digests[rec.workload] : '')
+                  )) || '';
                   const changed = !prevDig || prevDig !== rec.digest;
                   const statusBadge = changed ? '🔄 Updated' : '➖ Unchanged';
                   lines.push(
