@@ -140,6 +140,67 @@ class DescriptorTests(unittest.TestCase):
             with self.assertRaisesRegex(InvalidDescriptor, "staging keys"):
                 load_and_validate(self.write(Path(directory), value), check_files=False)
 
+    def test_accepts_staging_only_promotion_and_exports_empty_production_outputs(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"] = {
+            "repository": "Shhinobi/k3s-gitops-prod",
+            "baseBranch": "main",
+            "stagingBranch": "main",
+            "stagingPath": "clusters/prod/workloads/ninjasre-stg",
+            "stagingApplication": "stg-ninjasre",
+            "promotionMode": "staging-only",
+            "imagePromotion": "chart-values",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = self.write(root, value)
+            data = load_and_validate(descriptor, check_files=False)
+            self.assertEqual(data["gitops"]["promotionMode"], "staging-only")
+            output = root / "github-output"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "scripts/validate_descriptor.py"),
+                    str(descriptor),
+                    "--no-check-files",
+                    "--github-output",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = dict(
+                line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(outputs["gitops_promotion_mode"], "staging-only")
+            self.assertEqual(outputs["gitops_production_path"], "")
+            self.assertEqual(outputs["gitops_production_application"], "")
+
+    def test_rejects_production_keys_for_staging_only(self) -> None:
+        value = yaml.safe_load(yaml.safe_dump(VALID))
+        value["gitops"]["promotionMode"] = "staging-only"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(InvalidDescriptor, "production keys"):
+                load_and_validate(self.write(Path(directory), value), check_files=False)
+
+    def test_json_schema_stays_in_sync_with_descriptor_validator_modes(self) -> None:
+        import json
+
+        schema_path = Path(__file__).parents[1] / "contracts/application.schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        gitops_props = schema["properties"]["gitops"]["properties"]
+        self.assertEqual(
+            set(gitops_props["imagePromotion"]["enum"]),
+            {"kustomize-images", "chart-values"},
+        )
+        self.assertEqual(
+            set(gitops_props["promotionMode"]["enum"]),
+            {"staging-and-production", "production-only", "staging-only"},
+        )
+        self.assertEqual(schema["properties"]["gitops"]["required"], ["repository", "baseBranch"])
+
     def test_rejects_unknown_image_promotion(self) -> None:
         value = yaml.safe_load(yaml.safe_dump(VALID))
         value["gitops"]["imagePromotion"] = "arbitrary"

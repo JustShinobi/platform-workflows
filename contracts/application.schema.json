@@ -21,8 +21,8 @@
           "image": {"type": "string", "pattern": "^registry\\.lan\\.kyo\\.ninja/[a-z0-9._/-]+$"},
           "context": {"$ref": "#/$defs/relativePath"},
           "dockerfile": {"$ref": "#/$defs/relativePath"},
-          "workload": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-          "container": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+          "workload": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+          "container": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
           "target": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"},
           "platforms": {
             "type": "array",
@@ -38,10 +38,7 @@
     "gitops": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "repository", "baseBranch", "stagingBranch", "productionBranch",
-        "stagingPath", "productionPath", "stagingApplication", "productionApplication"
-      ],
+      "required": ["repository", "baseBranch"],
       "properties": {
         "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
         "baseBranch": {"$ref": "#/$defs/gitRef"},
@@ -50,8 +47,41 @@
         "stagingPath": {"$ref": "#/$defs/relativePath"},
         "productionPath": {"$ref": "#/$defs/relativePath"},
         "stagingApplication": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"},
-        "productionApplication": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"}
-      }
+        "productionApplication": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$"},
+        "imagePromotion": {"enum": ["kustomize-images", "chart-values"]},
+        "promotionMode": {"enum": ["staging-and-production", "production-only", "staging-only"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"promotionMode": {"const": "production-only"}}, "required": ["promotionMode"]},
+          "then": {
+            "required": ["productionBranch", "productionPath", "productionApplication"],
+            "not": {"anyOf": [{"required": ["stagingBranch"]}, {"required": ["stagingPath"]}, {"required": ["stagingApplication"]}]}
+          }
+        },
+        {
+          "if": {"properties": {"promotionMode": {"const": "staging-only"}}, "required": ["promotionMode"]},
+          "then": {
+            "required": ["stagingBranch", "stagingPath", "stagingApplication"],
+            "not": {"anyOf": [{"required": ["productionBranch"]}, {"required": ["productionPath"]}, {"required": ["productionApplication"]}]}
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "properties": {"promotionMode": {"enum": ["production-only", "staging-only"]}},
+              "required": ["promotionMode"]
+            }
+          },
+          "then": {
+            "required": [
+              "stagingBranch", "productionBranch",
+              "stagingPath", "productionPath",
+              "stagingApplication", "productionApplication"
+            ]
+          }
+        }
+      ]
     },
     "t14": {
       "oneOf": [

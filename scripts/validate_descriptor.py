@@ -31,14 +31,13 @@ COMPONENT_KEYS = {
     "name", "image", "context", "dockerfile", "workload", "container", "target",
     "platforms", "rolloutProfile", "t14Only"
 }
-GITOPS_COMMON_KEYS = {
-    "repository", "baseBranch", "productionBranch", "productionPath", "productionApplication"
-}
+GITOPS_BASE_KEYS = {"repository", "baseBranch"}
+GITOPS_PRODUCTION_KEYS = {"productionBranch", "productionPath", "productionApplication"}
 GITOPS_STAGING_KEYS = {"stagingBranch", "stagingPath", "stagingApplication"}
-GITOPS_KEYS = GITOPS_COMMON_KEYS | GITOPS_STAGING_KEYS
+GITOPS_KEYS = GITOPS_BASE_KEYS | GITOPS_PRODUCTION_KEYS | GITOPS_STAGING_KEYS
 GITOPS_OPTIONAL_KEYS = {"imagePromotion", "promotionMode"}
 IMAGE_PROMOTION_MODES = {"kustomize-images", "chart-values"}
-PROMOTION_MODES = {"staging-and-production", "production-only"}
+PROMOTION_MODES = {"staging-and-production", "production-only", "staging-only"}
 T14_TARGETS = (
     "baseline",
     "proposed",
@@ -151,30 +150,39 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
             raise InvalidDescriptor(f"{label}.rolloutProfile is invalid")
 
     gitops = _mapping(data["gitops"], "gitops")
-    _keys(gitops, GITOPS_KEYS | GITOPS_OPTIONAL_KEYS, GITOPS_COMMON_KEYS, "gitops")
+    _keys(gitops, GITOPS_KEYS | GITOPS_OPTIONAL_KEYS, GITOPS_BASE_KEYS, "gitops")
     promotion_mode = gitops.get("promotionMode", "staging-and-production")
     if promotion_mode not in PROMOTION_MODES:
-        raise InvalidDescriptor("gitops.promotionMode must be staging-and-production or production-only")
-    if promotion_mode == "staging-and-production" and not GITOPS_STAGING_KEYS <= set(gitops):
-        raise InvalidDescriptor("gitops is missing staging keys for staging-and-production")
-    if promotion_mode == "production-only" and set(gitops) & GITOPS_STAGING_KEYS:
-        raise InvalidDescriptor("gitops staging keys are not allowed for production-only")
+        raise InvalidDescriptor(
+            "gitops.promotionMode must be staging-and-production, production-only, or staging-only"
+        )
+    if promotion_mode == "staging-and-production":
+        if not GITOPS_STAGING_KEYS <= set(gitops):
+            raise InvalidDescriptor("gitops is missing staging keys for staging-and-production")
+        if not GITOPS_PRODUCTION_KEYS <= set(gitops):
+            raise InvalidDescriptor("gitops is missing production keys for staging-and-production")
+    elif promotion_mode == "production-only":
+        if not GITOPS_PRODUCTION_KEYS <= set(gitops):
+            raise InvalidDescriptor("gitops is missing production keys for production-only")
+        if set(gitops) & GITOPS_STAGING_KEYS:
+            raise InvalidDescriptor("gitops staging keys are not allowed for production-only")
+    elif promotion_mode == "staging-only":
+        if not GITOPS_STAGING_KEYS <= set(gitops):
+            raise InvalidDescriptor("gitops is missing staging keys for staging-only")
+        if set(gitops) & GITOPS_PRODUCTION_KEYS:
+            raise InvalidDescriptor("gitops production keys are not allowed for staging-only")
     if gitops.get("imagePromotion", "kustomize-images") not in IMAGE_PROMOTION_MODES:
         raise InvalidDescriptor("gitops.imagePromotion must be kustomize-images or chart-values")
     _string(gitops["repository"], "gitops.repository", REPOSITORY)
-    for key in ("baseBranch", "productionBranch"):
-        _string(gitops[key], f"gitops.{key}", REF)
-    for key in ("productionPath",):
-        _relative_path(gitops[key], f"gitops.{key}")
-    for key in ("productionApplication",):
-        _string(gitops[key], f"gitops.{key}", APP_NAME)
-    if promotion_mode == "staging-and-production":
-        for key in ("stagingBranch",):
-            _string(gitops[key], f"gitops.{key}", REF)
-        for key in ("stagingPath",):
-            _relative_path(gitops[key], f"gitops.{key}")
-        for key in ("stagingApplication",):
-            _string(gitops[key], f"gitops.{key}", APP_NAME)
+    _string(gitops["baseBranch"], "gitops.baseBranch", REF)
+    if promotion_mode in {"staging-and-production", "production-only"}:
+        _string(gitops["productionBranch"], "gitops.productionBranch", REF)
+        _relative_path(gitops["productionPath"], "gitops.productionPath")
+        _string(gitops["productionApplication"], "gitops.productionApplication", APP_NAME)
+    if promotion_mode in {"staging-and-production", "staging-only"}:
+        _string(gitops["stagingBranch"], "gitops.stagingBranch", REF)
+        _relative_path(gitops["stagingPath"], "gitops.stagingPath")
+        _string(gitops["stagingApplication"], "gitops.stagingApplication", APP_NAME)
 
     t14 = data.get("t14")
     if t14 is not None:
@@ -217,7 +225,7 @@ def load_and_validate(path: Path, *, check_files: bool = True) -> dict[str, Any]
         _string(t14["baselineRepository"], "t14.baselineRepository", REPOSITORY)
         _string(t14["baselineRunId"], "t14.baselineRunId", RUN_ID)
         _string(t14["baselineArtifactName"], "t14.baselineArtifactName", ARTIFACT_NAME)
-        if gitops["stagingBranch"] != gitops["baseBranch"]:
+        if gitops.get("stagingBranch") != gitops["baseBranch"]:
             raise InvalidDescriptor(
                 "gitops.stagingBranch must match gitops.baseBranch for enabled T14"
             )
@@ -261,11 +269,11 @@ def main() -> int:
             "application": data["application"], "matrix": rendered,
             "gitops_repository": gitops["repository"], "gitops_base_branch": gitops["baseBranch"],
             "gitops_staging_branch": gitops.get("stagingBranch", ""),
-            "gitops_production_branch": gitops["productionBranch"],
+            "gitops_production_branch": gitops.get("productionBranch", ""),
             "gitops_staging_path": gitops.get("stagingPath", ""),
-            "gitops_production_path": gitops["productionPath"],
+            "gitops_production_path": gitops.get("productionPath", ""),
             "gitops_staging_application": gitops.get("stagingApplication", ""),
-            "gitops_production_application": gitops["productionApplication"],
+            "gitops_production_application": gitops.get("productionApplication", ""),
             "gitops_repository_name": gitops["repository"].split("/", 1)[1],
             "gitops_image_promotion": gitops.get("imagePromotion", "kustomize-images"),
             "gitops_promotion_mode": gitops.get("promotionMode", "staging-and-production"),
